@@ -14,7 +14,6 @@ import {
   zeroForceBuffer,
   zeroReductionBuffer,
   copyCurrentMacroToPrevious,
-  swapPopulationState,
   readForceReadback,
   readReductionReadback,
 } from "./gpuBuffers.js";
@@ -87,35 +86,46 @@ export function applyGeometryUpload(gpuCtx, pipelines, sim) {
   sim.gpu.state.uniformsDirty = false;
 }
 
-export function dispatchSimSteps(gpuCtx, pipelines, sim, stepCount = 1) {
+/**
+ * Dispatch one full simulation frame for a sim:
+ * - encodes all solver substeps into one command encoder
+ * - optionally encodes diagnostics on cadence
+ * - submits exactly once
+ *
+ * Returns:
+ * {
+ *   diagnosticsDispatched: boolean
+ * }
+ */
+export function dispatchSimFrame(gpuCtx, pipelines, sim, options = {}) {
   if (!sim.gpu.state.initialized) {
-    throw new Error(`dispatchSimSteps: sim '${sim.id}' is not initialized.`);
+    throw new Error(`dispatchSimFrame: sim '${sim.id}' is not initialized.`);
   }
 
   if (sim.gpu.state.geometryDirty || sim.geometry?.dirtyFlags?.gpuUploadRequired) {
     applyGeometryUpload(gpuCtx, pipelines, sim);
   }
 
-  for (let s = 0; s < stepCount; s++) {
-    // Increment stepCount first so the uniform upload reflects the step
-    // the GPU is about to execute (critical for pulsation phase).
-    // console.log(`step ${s}: activeIsIn=${sim.gpu.state.activePopulationIsIn}, NX=${sim.dims.NX}, NY=${sim.dims.NY}`);  // ← add this line
+  const stepCount = options.stepCount ?? sim.runtime.stepsPerFrame ?? 1;
+  const diagnosticsEveryFrames =
+    options.diagnosticsEveryFrames ?? GPU_TUNING.diagnosticsEveryFrames ?? 4;
+
+  const currentFrame = sim.runtime.frameCount ?? 0;
+  const shouldRunDiagnostics =
+    diagnosticsEveryFrames > 0 &&
+    (currentFrame % diagnosticsEveryFrames === 0);
+
+    const encoder = createCommandEncoder(gpuCtx, `${sim.id}-frame-encoder`);
+    const computeBindGroup = getActiveComputeBindGroup(sim);
+
+    for (let s = 0; s < stepCount; s++) {
     sim.runtime.stepCount += 1;
     sim.gpu.state.uniformsDirty = true;
-
-    // Upload must happen outside/before the encoder so writeBuffer is
-    // ordered before the compute commands that consume the uniforms.
     uploadSimParams(gpuCtx, sim);
     sim.gpu.state.uniformsDirty = false;
 
-    const encoder = createCommandEncoder(gpuCtx, `${sim.id}-solver-encoder-${s}`);
-
-    copyCurrentMacroToPrevious(gpuCtx, sim, encoder);
-
-    const computeBindGroup = getActiveComputeBindGroup(sim);
-
     {
-      const pass = encoder.beginComputePass({ label: `${sim.id}-solverA-pass` });
+      const pass = encoder.beginComputePass({ label: `${sim.id}-solverA-pass-${s}` });
       pass.setPipeline(pipelines.compute.solverA);
       pass.setBindGroup(0, computeBindGroup);
       pass.dispatchWorkgroups(
@@ -127,7 +137,7 @@ export function dispatchSimSteps(gpuCtx, pipelines, sim, stepCount = 1) {
     }
 
     {
-      const pass = encoder.beginComputePass({ label: `${sim.id}-solverB-pass` });
+      const pass = encoder.beginComputePass({ label: `${sim.id}-solverB-pass-${s}` });
       pass.setPipeline(pipelines.compute.solverB);
       pass.setBindGroup(0, computeBindGroup);
       pass.dispatchWorkgroups(
@@ -137,63 +147,86 @@ export function dispatchSimSteps(gpuCtx, pipelines, sim, stepCount = 1) {
       );
       pass.end();
     }
-
-    submitCommands(gpuCtx, encoder.finish());
-
   }
-}
+ const particleCount = getParticleCountFromBuffer(sim);
+  const shouldRunParticles =
+    !!sim.display?.smokeVisible &&
+    !!sim.gpu.buffers?.particles &&
+    particleCount > 0;
 
-export function dispatchForceAndReduction(gpuCtx, pipelines, sim) {
-  if (!sim.gpu.state.initialized) return;
+  if (shouldRunParticles) {
+    if (sim.gpu.state.uniformsDirty) {
+      uploadSimParams(gpuCtx, sim);
+      sim.gpu.state.uniformsDirty = false;
+    }
 
-  if (sim.gpu.state.uniformsDirty) {
-    uploadSimParams(gpuCtx, sim);
-  }
 
-  zeroForceBuffer(gpuCtx, sim);
-  zeroReductionBuffer(gpuCtx, sim);
-
-  const encoder = createCommandEncoder(gpuCtx, `${sim.id}-diagnostics-encoder`);
-  const computeBindGroup = getActiveComputeBindGroup(sim);
-
-  {
-    const pass = encoder.beginComputePass({ label: `${sim.id}-force-pass` });
-    pass.setPipeline(pipelines.compute.force);
+    const pass = encoder.beginComputePass({ label: `${sim.id}-particle-pass` });
+    pass.setPipeline(pipelines.compute.particle);
     pass.setBindGroup(0, computeBindGroup);
-
-    const count = sim.geometry?.arrays?.fluidSurfaceList?.length ?? 0;
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / 64)), 1, 1);
+    pass.dispatchWorkgroups(Math.max(1, Math.ceil(particleCount / 128)), 1, 1);
     pass.end();
   }
 
-  {
-    const pass = encoder.beginComputePass({ label: `${sim.id}-reduction-pass` });
-    pass.setPipeline(pipelines.compute.reduction);
-    pass.setBindGroup(0, computeBindGroup);
-    pass.dispatchWorkgroups(Math.max(1, Math.ceil(sim.dims.N / 64)), 1, 1);
-    pass.end();
+
+  if (shouldRunDiagnostics) {
+    if (sim.gpu.state.uniformsDirty) {
+      uploadSimParams(gpuCtx, sim);
+      sim.gpu.state.uniformsDirty = false;
+    }
+
+    zeroForceBuffer(gpuCtx, sim);
+    zeroReductionBuffer(gpuCtx, sim);
+
+
+    {
+      const pass = encoder.beginComputePass({ label: `${sim.id}-force-pass` });
+      pass.setPipeline(pipelines.compute.force);
+      pass.setBindGroup(0, computeBindGroup);
+
+      const count = sim.geometry?.arrays?.fluidSurfaceList?.length ?? 0;
+      pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / 64)), 1, 1);
+      pass.end();
+    }
+
+    {
+      const pass = encoder.beginComputePass({ label: `${sim.id}-reduction-pass` });
+      pass.setPipeline(pipelines.compute.reduction);
+      pass.setBindGroup(0, computeBindGroup);
+      pass.dispatchWorkgroups(Math.max(1, Math.ceil(sim.dims.N / 64)), 1, 1);
+      pass.end();
+    }
+
+    encoder.copyBufferToBuffer(
+      sim.gpu.buffers.force,
+      0,
+      sim.gpu.buffers.readback.force,
+      0,
+      16
+    );
+
+    encoder.copyBufferToBuffer(
+      sim.gpu.buffers.reduction,
+      0,
+      sim.gpu.buffers.readback.reduction,
+      0,
+      16
+    );
+
+    // Snapshot current macro only after diagnostics have consumed prevMacro.
+    copyCurrentMacroToPrevious(gpuCtx, sim, encoder);
   }
-
-  encoder.copyBufferToBuffer(
-    sim.gpu.buffers.force,
-    0,
-    sim.gpu.buffers.readback.force,
-    0,
-    16
-  );
-
-  encoder.copyBufferToBuffer(
-    sim.gpu.buffers.reduction,
-    0,
-    sim.gpu.buffers.readback.reduction,
-    0,
-    16
-  );
 
   submitCommands(gpuCtx, encoder.finish());
 
-  sim.gpu.readback.pending = true;
-  sim.gpu.readback.lastFrameRead = sim.runtime.frameCount;
+  if (shouldRunDiagnostics) {
+    sim.gpu.readback.pending = true;
+    sim.gpu.readback.lastFrameRead = currentFrame;
+  }
+
+  return {
+    diagnosticsDispatched: shouldRunDiagnostics,
+  };
 }
 
 export function dispatchParticleStep(gpuCtx, pipelines, sim) {
@@ -205,6 +238,7 @@ export function dispatchParticleStep(gpuCtx, pipelines, sim) {
 
   if (sim.gpu.state.uniformsDirty) {
     uploadSimParams(gpuCtx, sim);
+    sim.gpu.state.uniformsDirty = false;
   }
 
   const encoder = createCommandEncoder(gpuCtx, `${sim.id}-particle-encoder`);
@@ -228,6 +262,7 @@ export function dispatchReopenNodes(gpuCtx, pipelines, sim, nodeIndices = []) {
 
   if (sim.gpu.state.uniformsDirty) {
     uploadSimParams(gpuCtx, sim);
+    sim.gpu.state.uniformsDirty = false;
   }
 
   const encoder = createCommandEncoder(gpuCtx, `${sim.id}-reopen-encoder`);
@@ -245,11 +280,12 @@ export function dispatchReopenNodes(gpuCtx, pipelines, sim, nodeIndices = []) {
 export async function readbackSimDiagnostics(gpuCtx, sim) {
   if (!sim.gpu.readback.pending) return sim.diagnostics;
 
-    const [forceRaw, reduction] = await Promise.all([
+  const [forceRaw, reduction] = await Promise.all([
     readForceReadback(gpuCtx, sim),
     readReductionReadback(gpuCtx, sim),
-    ]);
-    if (!forceRaw || !reduction) return;
+  ]);
+
+  if (!forceRaw || !reduction) return sim.diagnostics;
 
   applyForceCoefficients(sim, forceRaw);
 
@@ -315,6 +351,5 @@ function mulberry32(a) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-
 
 

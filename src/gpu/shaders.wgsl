@@ -29,8 +29,8 @@ const CS_SQ : f32 = 1.0 / 3.0;
 const PI : f32 = 3.141592653589793;
 
 const U_CAP   : f32 = 0.28;
-const RHO_MIN : f32 = 0.35;
-const RHO_MAX : f32 = 3.0;
+const RHO_MIN : f32 = 0.05;
+const RHO_MAX : f32 = 5.0;
 const TAU_MIN : f32 = 0.545;
 const TAU_MAX : f32 = 5.0;
 
@@ -180,6 +180,11 @@ fn clampTau(tau : f32) -> f32 {
   return clamp(tau, TAU_MIN, TAU_MAX);
 }
 
+fn isFinite_f32(x : f32) -> bool {
+  return x == x && abs(x) < 3.4e38;
+}
+
+
 fn feq(i : u32, rho : f32, ux : f32, uy : f32) -> f32 {
   let cu = f32(CX[i]) * ux + f32(CY[i]) * uy;
   let uu = ux * ux + uy * uy;
@@ -328,14 +333,20 @@ fn solverA_main(@builtin(global_invocation_id) gid : vec3<u32>) {
     jy += fi * f32(CY[i]);
   }
 
-  if (!(rho > RHO_MIN && rho < RHO_MAX)) {
-    rho = 1.0;
-    jx = rho * U.u0;
-    jy = 0.0;
-  }
+var ux = select(0.0, jx / rho, rho > 1e-10);
+  var uy = select(0.0, jy / rho, rho > 1e-10);
 
-  var ux = jx / rho;
-  var uy = jy / rho;
+  let badRho = rho != rho || !(rho > RHO_MIN && rho < RHO_MAX);
+  let badVel = ux != ux || uy != uy;
+
+  if (badRho || badVel) {
+    let ux0 = U.u0;
+    for (var i : u32 = 0u; i < Q; i = i + 1u) {
+      fOut[pdfIndex(n, i)] = feq(i, 1.0, ux0, 0.0);
+    }
+    macroField[n] = MacroCell(1.0, ux0, 0.0, 0.0);
+    return;
+  }
 
   let spd2 = ux * ux + uy * uy;
   if (spd2 > U_CAP * U_CAP) {
@@ -525,7 +536,7 @@ fn solverB_main(@builtin(global_invocation_id) gid : vec3<u32>) {
    return;
   }
 
-  if (x == 0u) {
+ if (x == 0u && solid[n] == 0u) {
     var inletU = uDrive;
 
     if (U.nozzleActive != 0u) {
@@ -537,6 +548,7 @@ fn solverB_main(@builtin(global_invocation_id) gid : vec3<u32>) {
       fIn[pdfIndex(n, i)] = feq(i, 1.0, inletU, 0.0);
     }
   }
+
 
   if (y == 0u || y == U.NY - 1u) {
     let wallU = select(uDrive, U.uCoflow, U.nozzleActive != 0u);
@@ -552,17 +564,32 @@ if (x == U.NX - 1u && U.NX >= 2u) {
     }
   }
 
-  if (f32(x) >= U.spongeStartX && x < U.NX - 1u) {
+ if (f32(x) >= U.spongeStartX && x < U.NX - 1u && solid[n] == 0u) {
+    var rhoS = 0.0;
+    var jxS = 0.0;
+    var jyS = 0.0;
+
+    for (var i : u32 = 0u; i < Q; i = i + 1u) {
+      let fi = fIn[pdfIndex(n, i)];
+      rhoS += fi;
+      jxS += fi * f32(CX[i]);
+      jyS += fi * f32(CY[i]);
+    }
+
+    let invR = select(1.0, 1.0 / rhoS, rhoS > 0.0);
+    let uxS = jxS * invR;
+    let uyS = jyS * invR;
+
     let sLocal = max(0.0, min(1.0, (f32(x) - U.spongeStartX) / max(U.spongeWidth, 1.0)));
     let s = U.spongeStrength * sLocal * sLocal;
 
-    let m = macroField[n];
     for (var i : u32 = 0u; i < Q; i = i + 1u) {
-      let eq = feq(i, m.rho, m.ux, m.uy);
+      let eq = feq(i, rhoS, uxS, uyS);
       let off = pdfIndex(n, i);
       fIn[off] = (1.0 - s) * fIn[off] + s * eq;
     }
   }
+
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -610,7 +637,7 @@ fn force_main(@builtin(global_invocation_id) gid : vec3<u32>) {
       continue;
     }
 
-    let fi = fIn[off] - W[i] * U.rho0;
+   let fi = fOut[off] - W[i] * U.rho0;
 
     let dFx = 2.0 * cx * fi;
     let dFy = 2.0 * cy * fi;
@@ -872,44 +899,71 @@ fn field_fs(in : VsOut) -> @location(0) vec4<f32> {
   let xf = clamp(in.uv.x, 0.0, 0.999999) * f32(U.NX);
   let yf = clamp(in.uv.y, 0.0, 0.999999) * f32(U.NY);
 
-  let x = u32(floor(xf));
-  let y = u32(floor(yf));
-  let n = idx(x, y);
+  let x0 = u32(floor(xf));
+  let y0 = u32(floor(yf));
+  let x1 = min(x0 + 1u, U.NX - 1u);
+  let y1 = min(y0 + 1u, U.NY - 1u);
 
-  if (renderSolid[n] != 0u) {
+  let tx = fract(xf);
+  let ty = fract(yf);
+
+  let n = idx(x0, y0);
+
+  if (renderSolid[idx(x0, y0)] != 0u) {
     return vec4<f32>(40.0 / 255.0, 40.0 / 255.0, 45.0 / 255.0, 1.0);
   }
 
-  let m = renderMacroField[n];
+  let m00 = renderMacroField[idx(x0, y0)];
+  let m10 = renderMacroField[idx(x1, y0)];
+  let m01 = renderMacroField[idx(x0, y1)];
+  let m11 = renderMacroField[idx(x1, y1)];
+
+  let s00 = select(1.0, 0.0, renderSolid[idx(x0, y0)] != 0u);
+  let s10 = select(1.0, 0.0, renderSolid[idx(x1, y0)] != 0u);
+  let s01 = select(1.0, 0.0, renderSolid[idx(x0, y1)] != 0u);
+  let s11 = select(1.0, 0.0, renderSolid[idx(x1, y1)] != 0u);
+
+  let ux = (mix(m00.ux * s00, m10.ux * s10, tx) * (1.0 - ty)
+          + mix(m01.ux * s01, m11.ux * s11, tx) * ty);
+  let uy = (mix(m00.uy * s00, m10.uy * s10, tx) * (1.0 - ty)
+          + mix(m01.uy * s01, m11.uy * s11, tx) * ty);
+  let rho = (mix(m00.rho, m10.rho, tx) * (1.0 - ty)
+           + mix(m01.rho, m11.rho, tx) * ty);
 
   var t = 0.0;
 
   if (U.displayMode == 1u) {
-    let q = qcritAt(i32(x), i32(y));
-    let qScaled = clamp(q * U.colorScale * 10000.0, -1.0, 1.0);
+    let q = qcritAt(i32(x0), i32(y0));
+    let qScaled = clamp(q * 500.0, -1.0, 1.0);
     t = 0.5 * (qScaled + 1.0);
   } else {
-    let speed = sqrt(m.ux * m.ux + m.uy * m.uy);
+    let speed = sqrt(ux * ux + uy * uy);
     t = clamp(speed / max(U.colorScale, 1e-6), 0.0, 1.0);
   }
 
   var rgb = colormap(t);
 
   if (flagShowDist()) {
-    let rhoDev = abs(m.rho - 1.0);
-    let d = clamp(rhoDev * 12.0 / max(U.colorScale, 1e-6), 0.0, 1.0);
+    let rhoDev = abs(rho - 1.0);
+    let d = clamp(rhoDev * 30.0, 0.0, 1.0);
     rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0), 0.35 * d);
   }
 
   if (flagShowGrid()) {
     let gx = fract(xf);
     let gy = fract(yf);
-    let line = select(0.0, 1.0, gx < 0.04 || gx > 0.96 || gy < 0.04 || gy > 0.96);
+    let lineThresh = clamp(1.5 / max(f32(U.NX) / 32.0, 1.0), 0.018, 0.10);
+    let line = select(
+      0.0,
+      1.0,
+      gx < lineThresh || gx > (1.0 - lineThresh) ||
+      gy < lineThresh || gy > (1.0 - lineThresh)
+    );
     rgb = mix(rgb, vec3<f32>(0.92, 0.96, 1.0), 0.18 * line);
   }
 
   if (flagShowVectors()) {
-    let spacing = 12.0;
+    let spacing = max(8.0, round(f32(U.NX) / 22.0));
 
     let cellX = floor(xf / spacing) * spacing + 0.5 * spacing;
     let cellY = floor(yf / spacing) * spacing + 0.5 * spacing;
@@ -931,7 +985,7 @@ fn field_fs(in : VsOut) -> @location(0) vec4<f32> {
         let along = dot(local, dir);
         let perp = dot(local, vec2<f32>(-dir.y, dir.x));
 
-        let halfLen = clamp(2.0 + 18.0 * (vmag / max(U.u0, 1e-6)), 2.0, 5.0);
+        let halfLen = clamp(1.5 + 8.0 * (vmag / max(U.u0, 1e-6)), 1.5, 9.0);
         let shaft = select(
           0.0,
           1.0,
@@ -959,6 +1013,9 @@ fn field_fs(in : VsOut) -> @location(0) vec4<f32> {
 
   return vec4<f32>(rgb, 1.0);
 }
+
+
+
 
 // ---------------------------------------------------------
 // Particle render
@@ -1027,4 +1084,3 @@ fn particle_fs(in : ParticleVsOut) -> @location(0) vec4<f32> {
   let rgb = vec3<f32>(210.0 / 255.0, 235.0 / 255.0, 1.0);
   return vec4<f32>(rgb, alpha);
 }
-

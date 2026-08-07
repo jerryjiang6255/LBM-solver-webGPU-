@@ -27,8 +27,7 @@ import {
   initGpuSim,
   resetGpuSim,
   applyGeometryUpload,
-  dispatchSimSteps,
-  dispatchForceAndReduction,
+  dispatchSimFrame,
   dispatchParticleStep,
   dispatchReopenNodes,
   readbackSimDiagnostics,
@@ -258,19 +257,54 @@ function initSimGpu(sim) {
 }
 
 function rebuildSimGeometry(sim) {
+  const oldSolid = sim.geometry?.arrays?.solid
+    ? new Uint8Array(sim.geometry.arrays.solid)
+    : null;
+
   buildAndAttachGeometry(sim);
 
   sim.render.bodyRenderer?.clear();
   sim.render.bodyRenderer?.draw(sim.geometry.meta);
-
-  if (sim.userDraw) {
-    sim.userDraw.redrawWalls();
-  }
+  if (sim.userDraw) sim.userDraw.redrawWalls();
 
   applyGeometryUpload(app.gpuCtx, app.pipelines, sim);
-  resetGpuSim(app.gpuCtx, app.pipelines, sim, {
-    particleCount: sim.render.particleRenderer?.getCount?.() ?? 0,
-  });
+
+  if (oldSolid && sim.geometry?.arrays?.solid) {
+    const newSolid = sim.geometry.arrays.solid;
+    const reopen = [];
+    const closed = [];
+
+    for (let n = 0; n < newSolid.length; n++) {
+      if (oldSolid[n] !== 0 && newSolid[n] === 0) reopen.push(n);
+      if (oldSolid[n] === 0 && newSolid[n] !== 0) closed.push(n);
+    }
+
+    // Zero out fIn and fOut for newly closed nodes so neighbors
+    // don't pull stale fluid distributions during streaming
+    if (closed.length > 0) {
+    const { queue } = app.gpuCtx;
+    // Must match what uploadInitialFields writes for solid nodes:
+    // feq(i, rho=1, ux=0, uy=0) = W[i] * 1.0 = W[i]
+    const restEq = new Float32Array([
+        4/9,
+        1/9, 1/9, 1/9, 1/9,
+        1/36, 1/36, 1/36, 1/36,
+    ]);
+    for (const n of closed) {
+        const byteOffset = n * 9 * 4;
+        queue.writeBuffer(sim.gpu.buffers.fIn,  byteOffset, restEq);
+        queue.writeBuffer(sim.gpu.buffers.fOut, byteOffset, restEq);
+    }
+    }
+
+    if (reopen.length > 0) {
+      dispatchReopenNodes(app.gpuCtx, app.pipelines, sim, reopen);
+    }
+  }
+
+  sim.gpu.state.geometryDirty = false;
+  sim.geometry.dirtyFlags.geometryDirty = false;
+  sim.geometry.dirtyFlags.gpuUploadRequired = false;
 }
 
 function destroySim(sim) {
@@ -295,32 +329,26 @@ async function tick(now) {
 
   for (const sim of sims) {
     if (sim.runtime.running) {
-      dispatchSimSteps(app.gpuCtx, app.pipelines, sim, sim.runtime.stepsPerFrame);
-      dispatchParticleStep(app.gpuCtx, app.pipelines, sim);
-      dispatchForceAndReduction(app.gpuCtx, app.pipelines, sim);
-      await readbackSimDiagnostics(app.gpuCtx, sim);
+         dispatchSimFrame(app.gpuCtx, app.pipelines, sim, {
+        stepCount: sim.runtime.stepsPerFrame,
+      });
 
       sim.runtime.frameCount += 1;
+
+      await readbackSimDiagnostics(app.gpuCtx, sim);
     }
 
     sim.render.monitorRenderer?.maybeSample();
     sim.render.monitorRenderer?.draw();
 
     app.fieldRenderer.render(sim);
-sim.render.particleRenderer?.render(app.gpuCtx, app.pipelines);
+    sim.render.particleRenderer?.render(app.gpuCtx, app.pipelines);
   }
-
-    // TEMPORARY: readback after frame 5 to debug
-    // if (app.sim1?.runtime?.frameCount === 5) {
-    // await app.gpuCtx.queue.onSubmittedWorkDone();
-    // const { debugReadbackMacro, debugReadbackUniforms } = await import("./gpu/gpuBuffers.js");
-    // await debugReadbackUniforms(app.gpuCtx, app.sim1);
-    // await debugReadbackMacro(app.gpuCtx, app.sim1);
-    // }
 
   app.ui?.sync(buildUiSnapshot());
   requestAnimationFrame(tick);
-} 
+}
+
 
 // ---------------------------------------------------------
 // UI callbacks
@@ -482,11 +510,11 @@ function buildUiCallbacks() {
     },
 
     setGridVisible(enabled) {
-      for (const sim of activeSims()) {
+    for (const sim of activeSims()) {
         sim.display.showGrid = !!enabled;
-        sim.display.showDist = !!enabled;
-      }
-      app.ui.sync(buildUiSnapshot());
+        markUniformsDirty(sim);
+    }
+    app.ui.sync(buildUiSnapshot());
     },
 
     setRuntimeRunning(running) {

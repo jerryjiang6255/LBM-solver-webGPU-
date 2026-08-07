@@ -4,7 +4,7 @@
 export const GRID_PRESETS = {
   low:  { NX: 160, NY: 80 },
   mid:  { NX: 256, NY: 128 },
-  high: { NX: 512, NY: 256 },
+  high: { NX: 1024, NY: 512 },
 };
 
 export const DEFAULT_GRID_KEY = "mid";
@@ -73,6 +73,11 @@ export const GPU_TUNING = {
   maxMonitorHistory: 600,
   forceStatsWindow: 240,
   stCrossingHistory: 12,
+
+  // Performance tuning:
+  // Run GPU diagnostics + CPU readback only every N rendered frames.
+  // This does not change solver physics; it only reduces measurement overhead.
+  diagnosticsEveryFrames: 1,
 };
 
 export const PARTICLE_DEFAULTS = {
