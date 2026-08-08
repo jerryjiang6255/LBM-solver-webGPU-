@@ -11,7 +11,7 @@ export const DEFAULT_GRID_KEY = "mid";
 
 export const FLOW_DEFAULTS = {
   u0: 0.1732,
-  reynolds: 5000,
+  reynolds: 500,
   uCoflow: 0.005,
 
   pulsationOn: false,

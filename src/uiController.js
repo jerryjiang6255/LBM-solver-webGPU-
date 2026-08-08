@@ -13,6 +13,9 @@ import {
   CS_LATTICE,
 } from "./config.js";
 
+import { computeReBounds } from "./physics/boundaryModel.js";
+
+
 export function createUIController(callbacks = {}) {
   const cb = {
     setCompareMode: callbacks.setCompareMode ?? (() => {}),
@@ -342,10 +345,22 @@ export function createUIController(callbacks = {}) {
       setText(el.u0Value, `Ma ${(refSim.params.u0 / CS_LATTICE).toFixed(2)}`);
     }
 
-    if (el.reSlider) {
+   if (el.reSlider) {
+      const L =
+        refSim.geometry?.meta?.charLength ??
+        refSim.derived?.charLength ??
+        1.0;
+
+      const { reMin, reMax } = computeReBounds(refSim.params.u0, L);
+
+      el.reSlider.min = String(reMin);
+      el.reSlider.max = String(reMax);
+      el.reSlider.step = "10";
       el.reSlider.value = String(refSim.params.reynolds);
+
       setText(el.reValue, refSim.params.reynolds.toFixed(0));
     }
+
 
     if (el.pulseAmpSlider) {
       el.pulseAmpSlider.value = String(refSim.flow.pulsationAmp);

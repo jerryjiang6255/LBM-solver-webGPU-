@@ -20,6 +20,8 @@ import {
 
 import { buildGeometryPackage } from "./geometry.js";
 import { createUserDrawController } from "./userDraw.js";
+import { computeReBounds } from "./physics/boundaryModel.js";
+
 
 import { initWebGPUContext } from "./gpu/gpuContext.js";
 import { createGpuPipelines } from "./gpu/gpuPipelines.js";
@@ -262,6 +264,8 @@ function rebuildSimGeometry(sim) {
     : null;
 
   buildAndAttachGeometry(sim);
+  clampSimReynoldsToBounds(sim);
+
 
   sim.render.bodyRenderer?.clear();
   sim.render.bodyRenderer?.draw(sim.geometry.meta);
@@ -421,9 +425,10 @@ function buildUiCallbacks() {
       app.ui.sync(buildUiSnapshot());
     },
 
-    setInletVelocity(targetMode, u0) {
+   setInletVelocity(targetMode, u0) {
       forEachTarget(targetMode, sim => {
         sim.params.u0 = u0;
+        clampSimReynoldsToBounds(sim);
         markUniformsDirty(sim);
       });
       app.ui.sync(buildUiSnapshot());
@@ -627,6 +632,17 @@ function buildUiCallbacks() {
 // ---------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------
+
+function clampSimReynoldsToBounds(sim) {
+  const L =
+    sim.geometry?.meta?.charLength ??
+    sim.derived?.charLength ??
+    1.0;
+
+  const { reMin, reMax } = computeReBounds(sim.params.u0, L);
+  sim.params.reynolds = Math.min(reMax, Math.max(reMin, sim.params.reynolds));
+}
+
 function activeSims() {
   const sims = [];
   if (app.sim1) sims.push(app.sim1);
@@ -655,7 +671,7 @@ function forEachTarget(targetMode, fn) {
 }
 
 function recreateSimFromExisting(oldSim, id) {
-  const sim = createSimState({
+ const sim = createSimState({
     id,
     gridKey: app.currentGridKey,
 
@@ -689,9 +705,12 @@ function recreateSimFromExisting(oldSim, id) {
     stepsPerFrame: oldSim.runtime.stepsPerFrame,
   });
 
+  clampSimReynoldsToBounds(sim);
+
   sim.geometry.paintedNodes = new Set(oldSim.geometry.paintedNodes);
   return sim;
 }
+
 
 function buildUiSnapshot() {
   return {
