@@ -71,7 +71,6 @@ function makeEmptyGpuState() {
       force: null,
       reduction: null,
       particles: null,
-      particleRender: null,
       readback: null,
     },
     bindGroups: {

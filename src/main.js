@@ -30,10 +30,11 @@ import {
   resetGpuSim,
   applyGeometryUpload,
   dispatchSimFrame,
-  dispatchParticleStep,
   dispatchReopenNodes,
   readbackSimDiagnostics,
+  readbackParticleState,
 } from "./gpu/gpuSim.js";
+
 
 import {
   destroySimGpuBuffers,
@@ -342,10 +343,19 @@ async function tick(now) {
       await readbackSimDiagnostics(app.gpuCtx, sim);
     }
 
-    sim.render.monitorRenderer?.maybeSample();
+   sim.render.monitorRenderer?.maybeSample();
     sim.render.monitorRenderer?.draw();
 
     app.fieldRenderer.render(sim);
+
+    if (sim.display?.smokeVisible) {
+      const particleState = await readbackParticleState(app.gpuCtx, sim);
+      sim.render.particleRenderer?.setParticleState(particleState);
+    } else {
+      sim.render.particleRenderer?.setParticleState(null);
+      sim.render.particleRenderer?.hardClear?.();
+    }
+
     sim.render.particleRenderer?.render(app.gpuCtx, app.pipelines);
   }
 
@@ -517,6 +527,14 @@ function buildUiCallbacks() {
     setGridVisible(enabled) {
     for (const sim of activeSims()) {
         sim.display.showGrid = !!enabled;
+        markUniformsDirty(sim);
+    }
+    app.ui.sync(buildUiSnapshot());
+    },
+
+    setDistVisible(enabled) {
+    for (const sim of activeSims()) {
+        sim.display.showDist = !!enabled;
         markUniformsDirty(sim);
     }
     app.ui.sync(buildUiSnapshot());

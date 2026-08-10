@@ -104,8 +104,8 @@ struct SimUniforms {
 
  renderWidth : f32,
   renderHeight : f32,
-  _pad2 : f32,
-  _pad3 : f32,
+  stepsPerFrame : u32,
+  _pad3 : u32,
 
 };
 
@@ -182,6 +182,18 @@ fn clampTau(tau : f32) -> f32 {
 
 fn isFinite_f32(x : f32) -> bool {
   return x == x && abs(x) < 3.4e38;
+}
+
+fn uhash(n : u32) -> u32 {
+  var v = n * 1664525u + 1013904223u;
+  v ^= v >> 16u;
+  v *= 0x45d9f3bu;
+  v ^= v >> 16u;
+  return v;
+}
+
+fn frand(seed : u32) -> f32 {
+  return f32(uhash(seed)) / 4294967296.0;
 }
 
 
@@ -704,10 +716,13 @@ fn particle_main(@builtin(global_invocation_id) gid : vec3<u32>) {
   var p = particles[i];
   let vel = sampleVelocityBilinear(p.x, p.y);
 
+ let advectDt = max(1.0, f32(U.stepsPerFrame));
+
   p.vx = vel.x;
   p.vy = vel.y;
-  p.x = p.x + vel.x;
-  p.y = p.y + vel.y;
+  p.x = p.x + vel.x * advectDt;
+  p.y = p.y + vel.y * advectDt;
+
 
   let xi = u32(clamp(i32(p.x), 0, i32(U.NX) - 1));
   let yi = u32(clamp(i32(p.y), 0, i32(U.NY) - 1));
@@ -721,12 +736,72 @@ fn particle_main(@builtin(global_invocation_id) gid : vec3<u32>) {
     solid[n] != 0u ||
     (vel.x * vel.x + vel.y * vel.y) < 1e-8;
 
-  if (bad) {
-    p.x = 0.5;
-    p.y = f32(U.NY) * 0.5;
-    p.vx = 0.0;
-    p.vy = 0.0;
+ if (bad) {
+    if (U.isLidDriven != 0u) {
+      var respawned = false;
+
+      for (var k : u32 = 0u; k < 8u; k = k + 1u) {
+        let seed = i * 2654435761u + U.stepCount + k * 17u;
+        let rx = 2.0 + frand(seed + 1u) * max(1.0, f32(U.NX) - 4.0);
+        let ry = 2.0 + frand(seed + 2u) * max(1.0, f32(U.NY) - 4.0);
+
+        let xi = u32(clamp(i32(rx), 0, i32(U.NX) - 1));
+        let yi = u32(clamp(i32(ry), 0, i32(U.NY) - 1));
+        let rn = idx(xi, yi);
+
+        if (solid[rn] == 0u) {
+          p.x = rx;
+          p.y = ry;
+          p.vx = 0.0;
+          p.vy = 0.0;
+          respawned = true;
+          break;
+        }
+      }
+
+      if (!respawned) {
+        p.x = f32(U.NX) * 0.5;
+        p.y = f32(U.NY) * 0.5;
+        p.vx = 0.0;
+        p.vy = 0.0;
+      }
+    } else {
+      var respawned = false;
+
+      for (var k : u32 = 0u; k < 8u; k = k + 1u) {
+        let seed = i * 2654435761u + U.stepCount + k * 17u;
+        let r = frand(seed);
+
+        let centerBias = r < 0.35;
+        let yRange = select(f32(U.NY), f32(U.NY) * 0.5, centerBias);
+        let yOffset = select(0.0, f32(U.NY) * 0.25, centerBias);
+
+        let rx = frand(seed + 1u) * 2.0;
+        let ry = yOffset + frand(seed + 2u) * yRange;
+
+        let xi = u32(clamp(i32(rx), 0, i32(U.NX) - 1));
+        let yi = u32(clamp(i32(ry), 0, i32(U.NY) - 1));
+        let rn = idx(xi, yi);
+
+        if (solid[rn] == 0u) {
+          p.x = rx;
+          p.y = ry;
+          p.vx = 0.0;
+          p.vy = 0.0;
+          respawned = true;
+          break;
+        }
+      }
+
+      if (!respawned) {
+        p.x = 0.5;
+        p.y = f32(U.NY) * 0.5;
+        p.vx = 0.0;
+        p.vy = 0.0;
+      }
+    }
   }
+
 
   particles[i] = p;
 }
@@ -829,6 +904,7 @@ fn reopen_main(@builtin(global_invocation_id) gid : vec3<u32>) {
 // ---------------------------------------------------------
 @group(0) @binding(1) var<storage, read> renderMacroField : array<MacroCell>;
 @group(0) @binding(2) var<storage, read> renderSolid : array<u32>;
+@group(0) @binding(3) var<storage, read> renderFIn : array<f32>;
 
 @vertex
 fn field_vs(@builtin(vertex_index) vid : u32) -> VsOut {
@@ -944,9 +1020,95 @@ fn field_fs(in : VsOut) -> @location(0) vec4<f32> {
   var rgb = colormap(t);
 
   if (flagShowDist()) {
-    let rhoDev = abs(rho - 1.0);
-    let d = clamp(rhoDev * 30.0, 0.0, 1.0);
-    rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0), 0.35 * d);
+    // Fine grid lines (every node)
+    let gxd = fract(xf);
+    let gyd = fract(yf);
+    let fineGrid = select(0.0, 1.0,
+      gxd < 0.05 || gxd > 0.95 || gyd < 0.05 || gyd > 0.95);
+    rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0), 0.06 * fineGrid);
+
+    // Coarse grid lines every 8 nodes
+    let coarseStep = round(f32(U.NX) / 32.0);
+    let cxd = fract(xf / coarseStep);
+    let cyd = fract(yf / coarseStep);
+    let coarseThresh = 0.06 / coarseStep;
+    let coarseGrid = select(0.0, 1.0,
+      cxd < coarseThresh || cxd > (1.0 - coarseThresh) ||
+      cyd < coarseThresh || cyd > (1.0 - coarseThresh));
+    rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0), 0.20 * coarseGrid);
+
+    // f[i] distribution arms — one set per distSpacing nodes
+    let distSpacing = 16.0;
+    let nodeX = round(xf / distSpacing) * distSpacing;
+    let nodeY = round(yf / distSpacing) * distSpacing;
+    let nx = u32(clamp(i32(nodeX), 0, i32(U.NX) - 1));
+    let ny = u32(clamp(i32(nodeY), 0, i32(U.NY) - 1));
+    let nn = idx(nx, ny);
+
+    if (renderSolid[nn] == 0u) {
+      // local = fragment position relative to this node centre, in lattice units
+      let local = vec2<f32>(xf - nodeX, yf - nodeY);
+      let distFromCenter = length(local);
+
+      // Scale arms so f[i] ~ W[i] (equilibrium) fills about 40% of distSpacing
+      // W cardinal = 1/9 ~ 0.111, W diagonal = 1/36 ~ 0.028
+      // We want cardinal arms ~ distSpacing * 0.40 at equilibrium
+      // so scale = distSpacing * 0.40 / (1/9) = distSpacing * 3.6
+      let armScale = distSpacing * 2.4;
+
+      // D2Q9 directions: index 0=rest, 1=E, 2=N, 3=W, 4=S, 5=NE, 6=NW, 7=SW, 8=SE
+      // CX: 0,1,0,-1,0,1,-1,-1,1
+      // CY: 0,0,1,0,-1,1,1,-1,-1
+      let dX = array<f32,9>(0.0, 1.0, 0.0,-1.0, 0.0, 1.0,-1.0,-1.0, 1.0);
+      let dY = array<f32,9>(0.0, 0.0, 1.0, 0.0,-1.0, 1.0, 1.0,-1.0,-1.0);
+
+      // Line SDF thickness — thicker for cardinals, thinner for diagonals
+      let shaftThick = distSpacing * 0.004;
+      let headThick  = distSpacing * 0.004;
+
+      // Draw directions 1-8 as arrows
+      for (var i : u32 = 1u; i < Q; i = i + 1u) {
+        let fi     = renderFIn[pdfIndex(nn, i)];
+        let armLen = fi * armScale;
+
+        if (armLen < 0.3) { continue; }
+
+        let dir    = vec2<f32>(dX[i], dY[i]) * (1.0 / sqrt(dX[i]*dX[i] + dY[i]*dY[i]));
+        let tipPt  = dir * armLen;
+
+        // Shaft SDF
+        let h = clamp(dot(local, tipPt) / max(dot(tipPt, tipPt), 1e-6), 0.0, 1.0);
+        let shaftD = length(local - tipPt * h);
+
+        // Arrowhead: two lines from tip backwards at ±30 deg
+        let headLen = min(armLen * 0.35, distSpacing * 0.18);
+        let c30 = 0.866;
+        let s30 = 0.5;
+
+        let h1dir = vec2<f32>(-dir.x * c30 + dir.y * s30, -dir.x * s30 - dir.y * c30);
+        let h2dir = vec2<f32>(-dir.x * c30 - dir.y * s30,  dir.x * s30 - dir.y * c30);
+
+        let fromTip = local - tipPt;
+        let seg1 = h1dir * headLen;
+        let seg2 = h2dir * headLen;
+
+        let t1 = clamp(dot(fromTip, seg1) / max(dot(seg1,seg1), 1e-6), 0.0, 1.0);
+        let t2 = clamp(dot(fromTip, seg2) / max(dot(seg2,seg2), 1e-6), 0.0, 1.0);
+        let d1 = length(fromTip - seg1 * t1);
+        let d2 = length(fromTip - seg2 * t2);
+
+        let onShaft = shaftD < shaftThick;
+        let onHead  = d1 < headThick || d2 < headThick;
+      if (onShaft || onHead) {
+          rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0), 0.90);
+        }
+      }
+
+      // Center dot
+      if (distFromCenter <distSpacing * 0.025) {
+        rgb = mix(rgb, vec3<f32>(1.0, 1.0, 1.0), 0.95);
+      }
+    }
   }
 
   if (flagShowGrid()) {
@@ -963,7 +1125,7 @@ fn field_fs(in : VsOut) -> @location(0) vec4<f32> {
   }
 
   if (flagShowVectors()) {
-    let spacing = max(8.0, round(f32(U.NX) / 22.0));
+    let spacing = 8.0;
 
     let cellX = floor(xf / spacing) * spacing + 0.5 * spacing;
     let cellY = floor(yf / spacing) * spacing + 0.5 * spacing;
@@ -980,33 +1142,45 @@ fn field_fs(in : VsOut) -> @location(0) vec4<f32> {
 
       if (vmag > 1e-6) {
         let dir = vec2<f32>(vx, vy) / vmag;
-
         let local = vec2<f32>(xf - cellX, yf - cellY);
         let along = dot(local, dir);
-        let perp = dot(local, vec2<f32>(-dir.y, dir.x));
+        let perp  = dot(local, vec2<f32>(-dir.y, dir.x));
 
-        let halfLen = clamp(1.5 + 8.0 * (vmag / max(U.u0, 1e-6)), 1.5, 9.0);
-        let shaft = select(
-          0.0,
-          1.0,
-          abs(perp) < 0.22 && along > -halfLen && along < halfLen
-        );
+        // One-directional arrow, length proportional to speed
+        let arrowLen = clamp(spacing * 0.42 * (vmag / max(U.u0, 1e-6)), 1.0, spacing * 0.44);
 
-        let tipBase = dir * halfLen;
-        let tip1 = vec2<f32>(
-          local.x - tipBase.x + 0.9 * dir.x - 0.7 * (-dir.y),
-          local.y - tipBase.y + 0.9 * dir.y - 0.7 * dir.x
-        );
-        let tip2 = vec2<f32>(
-          local.x - tipBase.x + 0.9 * dir.x + 0.7 * (-dir.y),
-          local.y - tipBase.y + 0.9 * dir.y + 0.7 * dir.x
-        );
+        // Shaft: from center (0) forward to arrowLen
+        let shaft = select(0.0, 1.0,
+          abs(perp) < 0.1 && along >= 0.0 && along <= arrowLen);
 
-        let head1 = select(0.0, 1.0, length(tip1) < 0.28);
-        let head2 = select(0.0, 1.0, length(tip2) < 0.28);
+        // Arrowhead — two lines from tip at ±PI/6 going backwards
+        let tipPt  = dir * arrowLen;
+        let headLen = arrowLen * 0.38;
 
+        // Rotate dir backwards by ±30 degrees
+        let c30 = 0.866;
+        let s30 = 0.5;
+        let h1dir = vec2<f32>(-dir.x * c30 + dir.y * s30, -dir.x * s30 - dir.y * c30);
+        let h2dir = vec2<f32>(-dir.x * c30 - dir.y * s30,  dir.x * s30 - dir.y * c30);
+
+        // SDF of arrowhead line segment 1
+        let v1  = local - tipPt;
+        let seg1 = h1dir * headLen;
+        let t1  = clamp(dot(v1, seg1) / max(dot(seg1, seg1), 1e-6), 0.0, 1.0);
+        let d1  = length(v1 - seg1 * t1);
+
+        // SDF of arrowhead line segment 2
+        let v2  = local - tipPt;
+        let seg2 = h2dir * headLen;
+        let t2  = clamp(dot(v2, seg2) / max(dot(seg2, seg2), 1e-6), 0.0, 1.0);
+        let d2  = length(v2 - seg2 * t2);
+
+        let head1 = select(0.0, 1.0, d1 < 0.1);
+        let head2 = select(0.0, 1.0, d2 < 0.1);
+
+        let alpha = 0.25 + 0.75 * clamp(vmag / max(U.u0, 1e-6), 0.0, 1.0);
         let vecMask = max(shaft, max(head1, head2));
-        rgb = mix(rgb, vec3<f32>(0.95, 0.98, 1.0), 0.75 * vecMask);
+        rgb = mix(rgb, vec3<f32>(0.95, 0.98, 1.0), alpha * vecMask);
       }
     }
   }

@@ -14,8 +14,10 @@ import {
   zeroForceBuffer,
   zeroReductionBuffer,
   copyCurrentMacroToPrevious,
+  encodeParticleReadbackCopy,
   readForceReadback,
   readReductionReadback,
+  readParticleReadback,
 } from "./gpuBuffers.js";
 import { rebuildSimBindGroups, getActiveComputeBindGroup } from "./gpuPipelines.js";
 import { applyForceCoefficients } from "../physics/forceModel.js";
@@ -86,17 +88,7 @@ export function applyGeometryUpload(gpuCtx, pipelines, sim) {
   sim.gpu.state.uniformsDirty = false;
 }
 
-/**
- * Dispatch one full simulation frame for a sim:
- * - encodes all solver substeps into one command encoder
- * - optionally encodes diagnostics on cadence
- * - submits exactly once
- *
- * Returns:
- * {
- *   diagnosticsDispatched: boolean
- * }
- */
+
 export function dispatchSimFrame(gpuCtx, pipelines, sim, options = {}) {
   if (!sim.gpu.state.initialized) {
     throw new Error(`dispatchSimFrame: sim '${sim.id}' is not initialized.`);
@@ -153,6 +145,10 @@ export function dispatchSimFrame(gpuCtx, pipelines, sim, options = {}) {
     !!sim.display?.smokeVisible &&
     !!sim.gpu.buffers?.particles &&
     particleCount > 0;
+
+  const shouldReadbackParticles = shouldRunParticles;
+
+
 
   if (shouldRunParticles) {
     if (sim.gpu.state.uniformsDirty) {
@@ -217,6 +213,11 @@ export function dispatchSimFrame(gpuCtx, pipelines, sim, options = {}) {
     copyCurrentMacroToPrevious(gpuCtx, sim, encoder);
   }
 
+    if (shouldReadbackParticles) {
+        encodeParticleReadbackCopy(gpuCtx, sim, encoder);
+    }
+
+
   submitCommands(gpuCtx, encoder.finish());
 
   if (shouldRunDiagnostics) {
@@ -227,30 +228,6 @@ export function dispatchSimFrame(gpuCtx, pipelines, sim, options = {}) {
   return {
     diagnosticsDispatched: shouldRunDiagnostics,
   };
-}
-
-export function dispatchParticleStep(gpuCtx, pipelines, sim) {
-  if (!sim.gpu.state.initialized) return;
-  if (!sim.gpu.buffers.particles) return;
-
-  const count = getParticleCountFromBuffer(sim);
-  if (count <= 0) return;
-
-  if (sim.gpu.state.uniformsDirty) {
-    uploadSimParams(gpuCtx, sim);
-    sim.gpu.state.uniformsDirty = false;
-  }
-
-  const encoder = createCommandEncoder(gpuCtx, `${sim.id}-particle-encoder`);
-  const computeBindGroup = getActiveComputeBindGroup(sim);
-
-  const pass = encoder.beginComputePass({ label: `${sim.id}-particle-pass` });
-  pass.setPipeline(pipelines.compute.particle);
-  pass.setBindGroup(0, computeBindGroup);
-  pass.dispatchWorkgroups(Math.max(1, Math.ceil(count / 128)), 1, 1);
-  pass.end();
-
-  submitCommands(gpuCtx, encoder.finish());
 }
 
 export function dispatchReopenNodes(gpuCtx, pipelines, sim, nodeIndices = []) {
@@ -275,6 +252,13 @@ export function dispatchReopenNodes(gpuCtx, pipelines, sim, nodeIndices = []) {
   pass.end();
 
   submitCommands(gpuCtx, encoder.finish());
+}
+
+export async function readbackParticleState(gpuCtx, sim) {
+  if (!sim.display?.smokeVisible) return null;
+  if (!sim.gpu?.buffers?.particles) return null;
+
+  return await readParticleReadback(gpuCtx, sim);
 }
 
 export async function readbackSimDiagnostics(gpuCtx, sim) {

@@ -81,8 +81,8 @@ export const GPU_TUNING = {
 };
 
 export const PARTICLE_DEFAULTS = {
-  countSingle: 1400,
-  countCompare: 900,
+  countSingle: 800,
+  countCompare: 600,
   pointRadius: 5,
   alphaMin: 0.16,
   alphaMax: 1.0,

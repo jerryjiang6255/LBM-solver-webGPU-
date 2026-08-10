@@ -11,7 +11,6 @@ export function createGpuPipelines(gpuCtx, shaderCode) {
   const bindGroupLayouts = {
     simCompute: createSimComputeBindGroupLayout(device),
     fieldRender: createFieldRenderBindGroupLayout(device),
-    particleRender: createParticleRenderBindGroupLayout(device),
   };
 
   const pipelineLayouts = {
@@ -23,11 +22,6 @@ export function createGpuPipelines(gpuCtx, shaderCode) {
     fieldRender: device.createPipelineLayout({
       label: "field-render-pipeline-layout",
       bindGroupLayouts: [bindGroupLayouts.fieldRender],
-    }),
-
-    particleRender: device.createPipelineLayout({
-      label: "particle-render-pipeline-layout",
-      bindGroupLayouts: [bindGroupLayouts.particleRender],
     }),
   };
 
@@ -125,44 +119,6 @@ export function createGpuPipelines(gpuCtx, shaderCode) {
         cullMode: "none",
       },
     }),
-
-    particles: device.createRenderPipeline({
-      label: "particle-render-pipeline",
-      layout: pipelineLayouts.particleRender,
-
-      vertex: {
-        module: shaderModule,
-        entryPoint: "particle_vs",
-      },
-
-      fragment: {
-        module: shaderModule,
-        entryPoint: "particle_fs",
-        targets: [
-          {
-            format: presentationFormat,
-            blend: {
-              color: {
-                srcFactor: "src-alpha",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
-              },
-              alpha: {
-                srcFactor: "one",
-                dstFactor: "one-minus-src-alpha",
-                operation: "add",
-              },
-            },
-            writeMask: GPUColorWrite.ALL,
-          },
-        ],
-      },
-
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none",
-      },
-    }),
   };
 
   return {
@@ -218,24 +174,12 @@ export function createFieldRenderBindGroup(device, pipelines, sim) {
       { binding: 0, resource: { buffer: b.uniforms } },
       { binding: 1, resource: { buffer: b.macro } },
       { binding: 2, resource: { buffer: b.solid } },
+      { binding: 3, resource: { buffer: b.fIn } },
     ],
   });
 }
 
-export function createParticleRenderBindGroup(device, pipelines, sim) {
-  const b = sim.gpu.buffers;
-  const particleBuffer = b.particles ?? createFallbackParticleBuffer(device);
 
-  return device.createBindGroup({
-    label: `${sim.id}-particle-render-bind-group`,
-    layout: pipelines.bindGroupLayouts.particleRender,
-    entries: [
-      { binding: 0, resource: { buffer: b.uniforms } },
-      { binding: 1, resource: { buffer: particleBuffer } },
-      { binding: 2, resource: { buffer: b.macro } },
-    ],
-  });
-}
 
 export function rebuildSimBindGroups(gpuCtx, pipelines, sim) {
   const { device } = gpuCtx;
@@ -260,7 +204,6 @@ export function rebuildSimBindGroups(gpuCtx, pipelines, sim) {
   );
 
   sim.gpu.bindGroups.fieldRender = createFieldRenderBindGroup(device, pipelines, sim);
-  sim.gpu.bindGroups.particleRender = createParticleRenderBindGroup(device, pipelines, sim);
 
   return sim.gpu.bindGroups;
 }
@@ -387,45 +330,15 @@ function createFieldRenderBindGroupLayout(device) {
         visibility: GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       },
-    ],
-  });
-}
-
-function createParticleRenderBindGroupLayout(device) {
-  return device.createBindGroupLayout({
-    label: "particle-render-bgl",
-    entries: [
       {
-        binding: 0,
-        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-        buffer: { type: "uniform" },
-      },
-      {
-        binding: 1,
-        visibility: GPUShaderStage.VERTEX,
-        buffer: { type: "read-only-storage" },
-      },
-      {
-        binding: 2,
-        visibility: GPUShaderStage.VERTEX,
+        binding: 3,
+        visibility: GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       },
     ],
   });
 }
 
-let _fallbackParticleBuffer = null;
 
-function createFallbackParticleBuffer(device) {
-  if (_fallbackParticleBuffer) return _fallbackParticleBuffer;
-
-  _fallbackParticleBuffer = device.createBuffer({
-    label: "fallback-particle-buffer",
-    size: 16,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-
-  return _fallbackParticleBuffer;
-}
 
 

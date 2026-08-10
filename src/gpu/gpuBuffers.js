@@ -12,6 +12,7 @@ const UINT_SIZE = 4;
 const MACRO_STRIDE_FLOATS = 4; // rho, ux, uy, aux
 const PARTICLE_STRIDE_FLOATS = 4; // x, y, vx, vy
 
+
 // ---------------------------------------------------------
 // Public API
 // ---------------------------------------------------------
@@ -26,6 +27,7 @@ export function createSimGpuBuffers(gpuCtx, sim, options = {}) {
 
   const particleCount = options.particleCount ?? 0;
   const particleByteSize = particleCount * PARTICLE_STRIDE_FLOATS * FLOAT_SIZE;
+  const particleReadbackByteSize = Math.max(16, particleByteSize);
 
   sim.gpu.buffers = {
     fIn: createStorageBuffer(device, fByteSize, "sim-fIn"),
@@ -53,11 +55,13 @@ export function createSimGpuBuffers(gpuCtx, sim, options = {}) {
 
     reopenNodes: createStorageBuffer(device, UINT_SIZE, "sim-reopenNodes"),
 
-    particleRender: null,
 
-    readback: {
+   readback: {
       force: createReadbackBuffer(gpuCtx, 16, "sim-force-readback"),
       reduction: createReadbackBuffer(gpuCtx, 16, "sim-reduction-readback"),
+      particles: particleCount > 0
+        ? createReadbackBuffer(gpuCtx, particleReadbackByteSize, "sim-particles-readback")
+        : null,
     },
   };
 
@@ -105,10 +109,10 @@ export function destroySimGpuBuffers(sim) {
     reduction: null,
     particles: null,
     reopenNodes: null,
-    particleRender: null,
     readback: {
       force: null,
       reduction: null,
+      particles: null,
     },
   };
 }
@@ -255,6 +259,25 @@ export function copyCurrentMacroToPrevious(gpuCtx, sim, encoder) {
   );
 }
 
+export function encodeParticleReadbackCopy(gpuCtx, sim, encoder) {
+  const particleBuffer = sim.gpu?.buffers?.particles;
+  if (!particleBuffer) return false;
+
+  const readbackBuffer = ensureParticleReadbackBuffer(gpuCtx, sim);
+  if (!readbackBuffer) return false;
+
+  encoder.copyBufferToBuffer(
+    particleBuffer,
+    0,
+    readbackBuffer,
+    0,
+    particleBuffer.size
+  );
+
+  return true;
+}
+
+
 export function getActivePopulationBuffers(sim) {
   const { fIn, fOut } = sim.gpu.buffers;
   return sim.gpu.state.activePopulationIsIn
@@ -352,8 +375,9 @@ const renderHeight = sim.render?.flowCanvas?.height ?? sim.dims.NY;
  // slot 9
   view.setFloat32(o, renderWidth, true); o += FLOAT_SIZE;
   view.setFloat32(o, renderHeight, true); o += FLOAT_SIZE;
-  view.setFloat32(o, 0, true); o += FLOAT_SIZE;
-  view.setFloat32(o, 0, true); o += FLOAT_SIZE;
+  view.setUint32(o, sim.runtime.stepsPerFrame >>> 0, true); o += UINT_SIZE;
+  view.setUint32(o, 0, true); o += UINT_SIZE;
+
 
 
 
@@ -368,6 +392,27 @@ export async function readForceReadback(gpuCtx, sim) {
     fy: data[1] / 1e6,
     mz: data[2] / 1e6,
   };
+}
+
+export async function readParticleReadback(gpuCtx, sim) {
+  const particleBuffer = sim.gpu?.buffers?.particles;
+  const readbackBuffer = sim.gpu?.buffers?.readback?.particles;
+
+  if (!particleBuffer || !readbackBuffer) return null;
+
+  let copy;
+  try {
+    await readbackBuffer.mapAsync(GPUMapMode.READ);
+  } catch (e) {
+    if (e.name === "AbortError") return null;
+    throw e;
+  }
+
+  copy = new Float32Array(readbackBuffer.getMappedRange().slice(0));
+  readbackBuffer.unmap();
+
+  const particleCount = Math.floor(particleBuffer.size / (PARTICLE_STRIDE_FLOATS * FLOAT_SIZE));
+  return copy.subarray(0, particleCount * PARTICLE_STRIDE_FLOATS);
 }
 
 export async function readReductionReadback(gpuCtx, sim) {
@@ -430,6 +475,25 @@ function getUniformFloatCount() {
 
 function getUniformByteSize() {
   return getUniformFloatCount() * FLOAT_SIZE;
+}
+
+function ensureParticleReadbackBuffer(gpuCtx, sim) {
+  const { device } = gpuCtx;
+  const particleBuffer = sim.gpu?.buffers?.particles;
+  if (!particleBuffer) return null;
+
+  const neededSize = Math.max(16, particleBuffer.size);
+  const existing = sim.gpu?.buffers?.readback?.particles;
+
+  if (existing && existing.size >= neededSize) {
+    return existing;
+  }
+
+  destroyBufferSafe(existing);
+
+  const next = createReadbackBuffer(gpuCtx, neededSize, "sim-particles-readback");
+  sim.gpu.buffers.readback.particles = next;
+  return next;
 }
 
 async function mapReadbackInt32(buffer) {

@@ -37,6 +37,7 @@ export function createUIController(callbacks = {}) {
     setColorScale: callbacks.setColorScale ?? (() => {}),
     setVectorsVisible: callbacks.setVectorsVisible ?? (() => {}),
     setGridVisible: callbacks.setGridVisible ?? (() => {}),
+    setDistVisible: callbacks.setDistVisible ?? (() => {}),
     setRuntimeRunning: callbacks.setRuntimeRunning ?? (() => {}),
     resetTarget: callbacks.resetTarget ?? (() => {}),
     clearSandbox: callbacks.clearSandbox ?? (() => {}),
@@ -138,8 +139,8 @@ export function createUIController(callbacks = {}) {
     });
 
     byId("dist-btn")?.addEventListener("click", () => {
-      const next = !byId("dist-btn")?.classList.contains("active");
-      cb.setGridVisible(next);
+    const next = !byId("dist-btn")?.classList.contains("active");
+    cb.setDistVisible(next);
     });
 
     el.smokeBtn?.addEventListener("click", () => {
@@ -285,7 +286,7 @@ export function createUIController(callbacks = {}) {
     byId(refSim.display.mode === DISPLAY_MODES.QCRIT ? "mode-qcrit" : "mode-speed")?.classList.add("active");
 
     byId("vector-btn")?.classList.toggle("active", !!refSim.display.showVectors);
-    byId("dist-btn")?.classList.toggle("active", !!refSim.display.showGrid);
+    byId("dist-btn")?.classList.toggle("active", !!refSim.display.showDist);
     el.smokeBtn?.classList.toggle("active", !!refSim.display.smokeVisible);
 
     for (const id of ["vector-btn", "dist-btn", "mode-speed", "mode-qcrit"]) {
