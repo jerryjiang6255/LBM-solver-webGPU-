@@ -1,329 +1,167 @@
 // src/userDraw.js
-// CPU-side sandbox wall editing controller.
-// Owns stroke state and painted-node edits only.
-// Supports live dirty-node reporting during drag so GPU-side solid masks
-// can be updated without a full geometry rebuild on every mouse move.
+// ============================================================
+// Compare-mode ready wall drawing.
+// Instance-based: each sim/canvas gets its own drawer state.
+// Updated for global fidelity presets: dimensions come from sim.
+// WebGPU: painted nodes are mirrored to the GPU through sim.gpu
+// (node flags + rest-equilibrium populations).
+// ============================================================
 
-export function createUserDrawController(sim, wallCanvas, callbacks = {}) {
-  const {
-    onGeometryEdited = () => {},
-    onGeometryCommit = () => {},
-    isEnabled = () => true,
-  } = callbacks;
+const BRUSH_R = 1;
 
-  const state = {
-    brushRadius: 1,
-    strokes: [],
-    currentStroke: null,
-    lastLX: null,
-    lastLY: null,
-    isDrawing: false,
-    mode: "draw", // "draw" | "erase"
+export function createUserDraw(sim, wallCanvas) {
+  const strokes = [];
+  let currentStroke = null;
+  let lastLX = null;
+  let lastLY = null;
 
-    overlayCanvas: wallCanvas,
-    inputCanvas: null,
-  };
-
-  function setMode(mode) {
-    if (mode === "draw" || mode === "erase") {
-      state.mode = mode;
-    }
+  function beginStroke(lx, ly) {
+    lastLX = Math.round(lx);
+    lastLY = Math.round(ly);
+    currentStroke = [{ x: lx, y: ly }];
   }
 
-  function setBrushRadius(r) {
-    state.brushRadius = Math.max(1, r | 0);
-  }
-
-  function attachOverlayCanvas(canvas) {
-    state.overlayCanvas = canvas;
-  }
-
-  function attachInputCanvas(canvas) {
-    state.inputCanvas = canvas;
-  }
-
-  function beginStroke(lx, ly, mode = state.mode) {
-    state.isDrawing = true;
-    state.lastLX = Math.round(lx);
-    state.lastLY = Math.round(ly);
-    state.currentStroke = [{ x: lx, y: ly, mode }];
-  }
-
-  function paintStroke(lx, ly, mode = state.mode) {
+  function paintStroke(lx, ly, mode = "draw") {
     const x1 = Math.round(lx);
     const y1 = Math.round(ly);
-    const dirtySet = new Set();
 
-    if (state.lastLX === null || state.lastLY === null) {
-      paintBrush(x1, y1, mode, dirtySet);
+    if (lastLX === null) {
+      paintBrush(x1, y1, mode);
     } else {
-      rasterLine(state.lastLX, state.lastLY, x1, y1, mode, dirtySet);
+      bresenham(lastLX, lastLY, x1, y1, mode);
     }
 
-    state.lastLX = x1;
-    state.lastLY = y1;
+    lastLX = x1;
+    lastLY = y1;
 
-    if (state.currentStroke) {
-      state.currentStroke.push({ x: lx, y: ly, mode });
-    }
-
-    if (dirtySet.size > 0) {
-      markEditedOnly();
-      onGeometryEdited(sim, { dirtyNodes: Array.from(dirtySet) });
+    if (currentStroke && mode === "draw") {
+      currentStroke.push({ x: lx, y: ly });
     }
   }
 
-  function endStroke(mode = state.mode) {
-    if (state.currentStroke && state.currentStroke.length > 0) {
-      state.strokes.push(state.currentStroke);
+  function endStroke(mode = "draw") {
+    lastLX = null;
+    lastLY = null;
+
+    if (currentStroke && currentStroke.length > 0 && mode === "draw") {
+      strokes.push(currentStroke);
     }
-
-    state.isDrawing = false;
-    state.currentStroke = null;
-    state.lastLX = null;
-    state.lastLY = null;
-
-    markNeedsCommit();
-    onGeometryCommit(sim, { mode });
+    currentStroke = null;
   }
 
- function clearDrawing() {
-    const clearedNodes = Array.from(sim.geometry.paintedNodes);
+  function bresenham(x0, y0, x1, y1, mode) {
+    const dx = Math.abs(x1 - x0);
+    const dy = -Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
 
-    sim.geometry.paintedNodes.clear();
-
-    state.strokes.length = 0;
-    state.currentStroke = null;
-    state.lastLX = null;
-    state.lastLY = null;
-    state.isDrawing = false;
-
-    markNeedsCommit();
-    onGeometryCommit(sim, { mode: "clear", clearedNodes });
-  }
-
-  function redrawWalls() {
-    const canvas = state.overlayCanvas;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const NX = sim.dims.NX;
-    const NY = sim.dims.NY;
-    const W = canvas.width;
-    const H = canvas.height;
-    const sx = W / NX;
-    const sy = H / NY;
-
-    ctx.clearRect(0, 0, W, H);
-
-    const allStrokes = state.currentStroke
-      ? [...state.strokes, state.currentStroke]
-      : state.strokes;
-
-    if (allStrokes.length === 0) {
-      sim.geometry.dirtyFlags.wallOverlayDirty = false;
-      return;
+    let x = x0, y = y0;
+    while (true) {
+      paintBrush(x, y, mode);
+      if (x === x1 && y === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x += sx; }
+      if (e2 <= dx) { err += dx; y += sy; }
     }
-
-    const lineW = Math.max(sx, sy) * (state.brushRadius + 0.5);
-
-    for (const pts of allStrokes) {
-      if (!pts || pts.length === 0) continue;
-
-      ctx.save();
-      ctx.strokeStyle = "rgba(175, 198, 230, 0.75)";
-      ctx.lineWidth = lineW * 1.25;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      drawSmoothStroke(ctx, pts, sx, sy);
-      ctx.stroke();
-      ctx.restore();
-
-      ctx.save();
-      ctx.strokeStyle = "#292a2f";
-      ctx.lineWidth = lineW;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      drawSmoothStroke(ctx, pts, sx, sy);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    sim.geometry.dirtyFlags.wallOverlayDirty = false;
   }
 
-  function canvasToLattice(clientX, clientY) {
-    const canvas = state.inputCanvas;
-    if (!canvas) return { lx: 0, ly: 0 };
-
-    const rect = canvas.getBoundingClientRect();
-
-    return {
-      lx: (clientX - rect.left) * (sim.dims.NX / rect.width),
-      ly: (clientY - rect.top) * (sim.dims.NY / rect.height),
-    };
-  }
-
-  function bindPointerEvents(targetCanvas = state.inputCanvas) {
-    if (!targetCanvas) return;
-    attachInputCanvas(targetCanvas);
-
-    targetCanvas.addEventListener("mousedown", e => {
-      if (!isEnabled()) return;
-      if (e.button !== 0) return;
-
-      const { lx, ly } = canvasToLattice(e.clientX, e.clientY);
-      beginStroke(lx, ly);
-      paintStroke(lx, ly);
-      redrawWalls();
-    });
-
-    targetCanvas.addEventListener("mousemove", e => {
-      if (!isEnabled()) return;
-      if (!state.isDrawing) return;
-
-      const { lx, ly } = canvasToLattice(e.clientX, e.clientY);
-      paintStroke(lx, ly);
-      redrawWalls();
-    });
-
-    targetCanvas.addEventListener("mouseup", () => {
-      if (!isEnabled()) return;
-      if (!state.isDrawing) return;
-
-      endStroke();
-      redrawWalls();
-    });
-
-    targetCanvas.addEventListener("mouseleave", () => {
-      if (!isEnabled()) return;
-      if (!state.isDrawing) return;
-
-      endStroke();
-      redrawWalls();
-    });
-
-    targetCanvas.addEventListener("touchstart", e => {
-      if (!isEnabled()) return;
-
-      e.preventDefault();
-      const t = e.touches[0];
-      const { lx, ly } = canvasToLattice(t.clientX, t.clientY);
-      beginStroke(lx, ly);
-      paintStroke(lx, ly);
-      redrawWalls();
-    }, { passive: false });
-
-    targetCanvas.addEventListener("touchmove", e => {
-      if (!isEnabled()) return;
-      if (!state.isDrawing) return;
-
-      e.preventDefault();
-      const t = e.touches[0];
-      const { lx, ly } = canvasToLattice(t.clientX, t.clientY);
-      paintStroke(lx, ly);
-      redrawWalls();
-    }, { passive: false });
-
-    targetCanvas.addEventListener("touchend", () => {
-      if (!isEnabled()) return;
-      if (!state.isDrawing) return;
-
-      endStroke();
-      redrawWalls();
-    });
-  }
-
-  function paintBrush(lx, ly, mode = state.mode, dirtySet = null) {
-    const NX = sim.dims.NX;
-    const NY = sim.dims.NY;
-    const paintedNodes = sim.geometry.paintedNodes;
+  function paintBrush(lx, ly, mode) {
+    const { NX, NY, solid, solidBase, paintedNodes } = sim;
 
     const x0 = Math.round(lx);
     const y0 = Math.round(ly);
-    const r = state.brushRadius;
 
-    let changed = false;
-
-    for (let dy = -r; dy <= r; dy++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (dx * dx + dy * dy > r * r) continue;
+    for (let dy = -BRUSH_R; dy <= BRUSH_R; dy++) {
+      for (let dx = -BRUSH_R; dx <= BRUSH_R; dx++) {
+        if (dx * dx + dy * dy > BRUSH_R * BRUSH_R) continue;
 
         const x = x0 + dx;
         const y = y0 + dy;
-
         if (x < 1 || x >= NX - 1 || y < 1 || y >= NY - 1) continue;
 
         const n = y * NX + x;
 
         if (mode === "draw") {
-          if (paintedNodes.has(n)) continue;
+          if (solid[n]) continue;
+          solid[n] = 1;
           paintedNodes.add(n);
-          changed = true;
-          if (dirtySet) dirtySet.add(n);
+          sim.gpu?.paintNode(n);   // rest equilibrium, u = 0 (CPU reequilibrate)
+
         } else {
           if (!paintedNodes.has(n)) continue;
+          solid[n] = solidBase[n];
           paintedNodes.delete(n);
-          changed = true;
-          if (dirtySet) dirtySet.add(n);
+          sim.gpu?.writeNodeType(n);
         }
       }
     }
+  }
 
-    if (changed) {
-      markEditedOnly();
+  function clearDrawing() {
+    const { solid, solidBase, paintedNodes } = sim;
+
+    const cleared = Array.from(paintedNodes);
+    for (const n of cleared) {
+      solid[n] = solidBase[n];
     }
-  }
 
-  function rasterLine(x0, y0, x1, y1, mode, dirtySet = null) {
-    const dx = Math.abs(x1 - x0);
-    const dy = -Math.abs(y1 - y0);
-    const sx = x0 < x1 ? 1 : -1;
-    const sy = y0 < y1 ? 1 : -1;
-
-    let err = dx + dy;
-    let x = x0;
-    let y = y0;
-
-    while (true) {
-      paintBrush(x, y, mode, dirtySet);
-      if (x === x1 && y === y1) break;
-
-      const e2 = 2 * err;
-      if (e2 >= dy) {
-        err += dy;
-        x += sx;
-      }
-      if (e2 <= dx) {
-        err += dx;
-        y += sy;
-      }
+    paintedNodes.clear();
+    if (sim.gpu) {
+      for (const n of cleared) sim.gpu.writeNodeType(n);
     }
+
+    strokes.length = 0;
+    currentStroke = null;
+    lastLX = null;
+    lastLY = null;
   }
 
-  function markEditedOnly() {
-    sim.geometry.dirtyFlags.wallOverlayDirty = true;
-  }
+  function redrawWalls() {
+    if (!wallCanvas) return;
 
-  function markNeedsCommit() {
-    sim.geometry.dirtyFlags.geometryDirty = true;
-    sim.geometry.dirtyFlags.gpuUploadRequired = true;
-    sim.geometry.dirtyFlags.wallOverlayDirty = true;
+    const { NX, NY } = sim;
 
-    sim.gpu.state.geometryDirty = true;
-    sim.gpu.state.uniformsDirty = true;
+    const ctx = wallCanvas.getContext("2d");
+    const cW = wallCanvas.width;
+    const cH = wallCanvas.height;
+    const sx = cW / NX;
+    const sy = cH / NY;
+
+    ctx.clearRect(0, 0, cW, cH);
+
+    const allStrokes = currentStroke
+      ? [...strokes, currentStroke]
+      : strokes;
+
+    if (allStrokes.length === 0) return;
+
+    const lineW = sx * (BRUSH_R + 0.5);
+
+    for (const pts of allStrokes) {
+      if (pts.length === 0) continue;
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(175, 198, 230, 0.75)";
+      ctx.lineWidth   = lineW * 1.25;
+      ctx.lineCap     = "round";
+      ctx.lineJoin    = "round";
+      drawCatmullRom(ctx, pts, sx, sy);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.strokeStyle = "#292a2f";
+      ctx.lineWidth   = lineW;
+      ctx.lineCap     = "round";
+      ctx.lineJoin    = "round";
+      drawCatmullRom(ctx, pts, sx, sy);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   return {
-    state,
-    setMode,
-    setBrushRadius,
-    attachOverlayCanvas,
-    attachInputCanvas,
-    bindPointerEvents,
-    canvasToLattice,
     beginStroke,
     paintStroke,
     endStroke,
@@ -331,17 +169,21 @@ export function createUserDrawController(sim, wallCanvas, callbacks = {}) {
     redrawWalls,
     paintBrush,
     get strokes() {
-      return state.strokes;
-    },
+      return strokes;
+    }
+    
   };
 }
 
-function drawSmoothStroke(ctx, pts, sx, sy) {
+// ---------------------------------------------------------
+// drawCatmullRom(ctx, pts, sx, sy)
+// ---------------------------------------------------------
+function drawCatmullRom(ctx, pts, sx, sy) {
   if (pts.length === 1) {
     const x = pts[0].x * sx;
     const y = pts[0].y * sy;
     ctx.beginPath();
-    ctx.arc(x, y, ctx.lineWidth * 0.5, 0, Math.PI * 2);
+    ctx.arc(x, y, ctx.lineWidth / 2, 0, Math.PI * 2);
     ctx.fill();
     return;
   }
@@ -350,14 +192,17 @@ function drawSmoothStroke(ctx, pts, sx, sy) {
   ctx.moveTo(pts[0].x * sx, pts[0].y * sy);
 
   for (let i = 1; i < pts.length - 1; i++) {
-    const mx = ((pts[i].x + pts[i + 1].x) * 0.5) * sx;
-    const my = ((pts[i].y + pts[i + 1].y) * 0.5) * sy;
-    ctx.quadraticCurveTo(pts[i].x * sx, pts[i].y * sy, mx, my);
+    const mx = ((pts[i].x + pts[i + 1].x) / 2) * sx;
+    const my = ((pts[i].y + pts[i + 1].y) / 2) * sy;
+    ctx.quadraticCurveTo(
+      pts[i].x * sx,
+      pts[i].y * sy,
+      mx, my
+    );
   }
 
   const last = pts[pts.length - 1];
   ctx.lineTo(last.x * sx, last.y * sy);
 }
-
 
 

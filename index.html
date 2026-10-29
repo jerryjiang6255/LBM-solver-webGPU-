@@ -4,17 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LBM Flow Visualizer</title>
-  <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="style.css" />
 
   <meta property="og:title" content="Lattice Boltzmann Flow Visualizer" />
-  <meta property="og:description" content="Real-time D2Q9 LBM fluid simulation with selectable physics, pulsing inlet, BFL boundaries, monitor plotting, compare mode, and sandbox wall drawing." />
+  <meta property="og:description" content="Real-time D2Q9 LBM fluid simulation with selectable physics, pulsing inlet, BFL boundaries, and live sandbox drawing." />
   <meta property="og:image" content="https://jerryjiang6255.github.io/LBM-solver-/preview.png" />
-  <meta property="og:url" content="https://jerryjiang6255.github.io/LBM-solver-/" />
+  <meta property="og:url" content="https://jerryjiang6255.github.io/LBM-solver-webGPU-/" />
   <meta property="og:type" content="website" />
 
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Lattice Boltzmann Flow Visualizer" />
-  <meta name="twitter:description" content="Real-time D2Q9 LBM fluid simulation with selectable physics, pulsing inlet, BFL boundaries, monitor plotting, compare mode, and sandbox wall drawing." />
+  <meta name="twitter:description" content="Real-time D2Q9 LBM fluid simulation with selectable physics, pulsing inlet, BFL boundaries, and live sandbox drawing." />
   <meta name="twitter:image" content="https://jerryjiang6255.github.io/LBM-solver-/preview.png" />
 </head>
 <body>
@@ -22,11 +22,9 @@
     <header class="app-header">
       <h1>
         Lattice Boltzmann Sandbox
-        <span
-          class="tag tooltip-trigger"
-          data-tip="WebGPU version: GPU solver, compare mode, monitor plotting, sandbox wall drawing, selectable collision / LES models, pulsing inlet, BFL boundary handling, and GPU field rendering."
-        >WGPU</span>
-      </h1>
+        <span class="tag tooltip-trigger" data-tip="WebGPU version: the full V7 solver (TRT/BGK collision, Smagorinsky/WALE LES, wall model, pulsing inlet, BFL interpolated boundary, sandbox drawing, compare mode, convergence and force monitors) running on the GPU, at higher grid resolution than the CPU version.">WGPU</span>
+      </h1> 
+
 
       <span class="subtitle">
         <span class="tooltip-trigger" data-tip="D2Q9: 2-dimensional, 9-velocity lattice.">D2Q9</span>
@@ -41,15 +39,10 @@
         <span class="subtitle-sep"> · </span>
         <span class="tooltip-trigger" data-tip="BFL interpolated boundary condition using sub-grid wall location from the SDF.">BFL boundary</span>
         <span class="subtitle-sep"> · </span>
-        <span class="tooltip-trigger" data-tip="Wall model: near-wall damping / closure support.">Wall model</span>
+        <span class="tooltip-trigger" data-tip="Wall model: near-wall log-law turbulence closure.">Wall model</span>
       </span>
 
-      <a
-        class="credit"
-        href="https://www.linkedin.com/in/jerry-jiang-a38127285/"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
+      <a class="credit" href="https://www.linkedin.com/in/jerry-jiang-a38127285/" target="_blank" rel="noopener noreferrer">
         Built by <span class="credit-name">Jerry Jiang</span>
       </a>
     </header>
@@ -69,7 +62,8 @@
             <button class="btn" id="compare-btn">Compare</button>
             <button class="btn" id="convergence-btn">Monitor</button>
           </div>
-        </div>
+        </div> 
+
 
         <!-- Body -->
         <div class="ctrl-group">
@@ -92,7 +86,7 @@
               <span>Angle of attack</span>
               <output id="aoa-value">10.0°</output>
             </label>
-            <input type="range" id="aoa-slider" class="control-slider" min="-45" max="45" step="0.5" value="10" />
+            <input type="range" id="aoa-slider" class="control-slider" min="-45" max="45" step="0.5" value="10">
           </div>
 
           <div class="slider-row" id="nozzle-row" style="display:none">
@@ -100,7 +94,7 @@
               <span>Nozzle diameter</span>
               <output id="nozzle-value">16</output>
             </label>
-            <input type="range" id="nozzle-slider" class="control-slider" min="8" max="80" step="2" value="16" />
+            <input type="range" id="nozzle-slider" class="control-slider" min="8" max="80" step="2" value="16">
           </div>
 
           <div class="slider-row" id="cylinder-row" style="display:none">
@@ -108,7 +102,7 @@
               <span>Cylinder diameter</span>
               <output id="cylinder-value">32</output>
             </label>
-            <input type="range" id="cylinder-slider" class="control-slider" min="8" max="96" step="2" value="32" />
+            <input type="range" id="cylinder-slider" class="control-slider" min="8" max="96" step="2" value="32">
           </div>
 
           <div class="slider-row" id="cavity-aspect-row" style="display:none">
@@ -124,8 +118,8 @@
               max="2.00"
               step="0.05"
               value="1.00"
-            />
-          </div>
+            >
+          </div>    
         </div>
 
         <!-- Flow -->
@@ -136,7 +130,6 @@
             <button class="btn control-btn" id="pulse-off">Pulse Off</button>
             <button class="btn control-btn" id="pulse-on">Pulse On</button>
           </div>
-
           <div class="btn-grid">
             <button class="btn" id="smoke-btn">Smoke Tracer Particles</button>
           </div>
@@ -144,7 +137,7 @@
           <div class="slider-row">
             <label>
               <span id="u0-label">Inlet velocity</span>
-              <output id="u0-value">Ma 0.30</output>
+              <output id="u0-value">Ma=0.30</output>
             </label>
             <input type="range" id="u0-slider" class="control-slider" min="0.01" max="0.23" step="0.005" value="0.1732" />
           </div>
@@ -166,7 +159,7 @@
           </div>
         </div>
 
-        <!-- Physics -->
+       <!-- Physics -->
         <div class="ctrl-group">
           <div class="group-label">Physics</div>
 
@@ -178,16 +171,16 @@
 
           <div class="btn-grid">
             <button class="btn control-btn" id="collision-bgk">BGK</button>
-            <button class="btn control-btn" id="les-smag">Smag</button>
+            <button class="btn control-btn active" id="les-smag">Smag</button>
             <button class="btn control-btn" id="wall-off">Wall Off</button>
           </div>
 
           <div class="slider-row">
             <label>
               <span>Reynolds number</span>
-              <output id="re-value">500</output>
+              <output id="re-value">5000</output>
             </label>
-            <input type="range" id="re-slider" class="control-slider" min="20" max="10000" step="10" value="500" />
+            <input type="range" id="re-slider" class="control-slider" min="20" max="10000" step="10" value="5000" />
           </div>
         </div>
 
@@ -249,6 +242,7 @@
           <div class="group-label">Fidelity</div>
 
           <div style="display:flex; align-items:center; gap:12px;">
+
             <div class="btn-stack">
               <button class="btn" id="grid-high">High</button>
               <button class="btn active" id="grid-mid">Mid</button>
@@ -256,25 +250,48 @@
             </div>
 
             <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px;">
+
+              <!-- Grid -->
               <div style="display:flex; flex-direction:column; align-items:flex-start;">
                 <span class="stat-label">GRID</span>
-                <div style="display:flex; flex-direction:column; align-items:center; line-height:1; margin-top:2px;">
-                  <output class="stat-value" id="grid-nx" style="font-size:0.85rem;">256</output>
-                  <span class="stat-value" style="font-size:0.75rem; line-height:1; margin:1px 0;">×</span>
-                  <output class="stat-value" id="grid-ny" style="font-size:0.85rem;">128</output>
+
+                <div style="
+                  display:flex;
+                  flex-direction:column;
+                  align-items:center;
+                  line-height:1;
+                  margin-top:2px;
+                ">
+                  <output class="stat-value" id="grid-nx"
+                    style="font-size:0.85rem;">256</output>
+
+                  <span class="stat-value"
+                    style="
+                      font-size:0.75rem;
+                      line-height:1;
+                      margin:1px 0;
+                    ">×</span>
+
+                  <output class="stat-value" id="grid-ny"
+                    style="font-size:0.85rem;">128</output>
                 </div>
               </div>
 
+              <!-- Nodes -->
               <div style="display:flex; flex-direction:column; align-items:flex-start;">
                 <span class="stat-label">NODES</span>
-                <output class="stat-value" id="nodes-value" style="font-size:0.66rem;">32,768</output>
+                <output class="stat-value" id="nodes-value"
+                  style="font-size:0.66rem;">32,768</output>
               </div>
+
             </div>
+
           </div>
         </div>
 
         <p class="error" id="app-error" role="alert"></p>
-      </div>
+      </div> 
+
 
       <!-- Compare Target Bar -->
       <div class="flow-target-bar" id="flow-target-bar" style="display:none">
@@ -286,9 +303,11 @@
       <div class="compare-wrap">
         <div class="canvas-wrap" id="canvas-wrap-1" data-label="Flow 1">
           <canvas id="flow-canvas-1"></canvas>
+          <canvas id="overlay-canvas-1"></canvas>
           <canvas id="particles-canvas-1"></canvas>
           <canvas id="body-canvas-1"></canvas>
           <canvas id="wall-canvas-1"></canvas>
+
 
           <div class="monitor-mode-bar" id="monitor-mode-bar-1" style="display:none">
             <button class="btn monitor-mode-btn active" id="monitor-conv-btn-1">Convergence</button>
@@ -300,9 +319,11 @@
 
         <div class="canvas-wrap" id="canvas-wrap-2" data-label="Flow 2" style="display:none">
           <canvas id="flow-canvas-2"></canvas>
+          <canvas id="overlay-canvas-2"></canvas>
           <canvas id="particles-canvas-2"></canvas>
           <canvas id="body-canvas-2"></canvas>
           <canvas id="wall-canvas-2"></canvas>
+
 
           <div class="monitor-mode-bar" id="monitor-mode-bar-2" style="display:none">
             <button class="btn monitor-mode-btn active" id="monitor-conv-btn-2">Convergence</button>
@@ -316,36 +337,41 @@
 
     <footer class="footer">
       <p>
-        Educational use only. This simulator demonstrates a D2Q9 Lattice Boltzmann Method
-        flow solver with selectable collision and LES models, pulsing inlet forcing,
-        BFL wall handling, compare mode, monitor plotting, and sandbox wall drawing.
-        The WebGPU version preserves the same intended external behavior while moving
-        the core solver and field rendering onto the GPU for higher performance.
+        Educational use only. This simulator demonstrates the power of the
+        Lattice Boltzmann Method (LBM) as an alternative to traditional Navier-Stokes CFD solvers.
+        Unlike conventional CFD, LBM models fluid behaviour through particle distribution functions
+        on a discrete lattice — collision and streaming steps replace the complex pressure-velocity
+        coupling of Navier-Stokes. This makes LBM naturally parallel, highly efficient, and
+        remarkably capable of handling complex geometries without the need for mesh generation or
+        remeshing — as demonstrated by the sandbox drawing feature, where arbitrary walls can be
+        placed in real time and the flow adapts instantly without any restart or remesh. The solver
+        here uses a D2Q9 lattice with selectable collision / LES physics, pulsing inlet forcing,
+        BFL interpolated boundary conditions, monitor plotting, and SDF-based geometry. This
+        WebGPU version runs the same solver on the GPU, which allows finer grids at every
+        fidelity level. Any feedback or advice is greatly appreciated.
       </p>
     </footer>
   </div>
 
+  <!-- Error handling -->
   <script>
     const errEl = () => document.getElementById("app-error");
 
     window.addEventListener("error", e => {
-      const el = errEl();
-      if (!el) return;
-      el.textContent =
+      errEl().textContent =
         "Error: " + (e.message || e.error) +
         (e.filename ? ` (${e.filename}:${e.lineno})` : "");
     });
 
     window.addEventListener("unhandledrejection", e => {
-      const el = errEl();
-      if (!el) return;
-      el.textContent =
+      errEl().textContent =
         "Unhandled rejection: " + (e.reason?.message || e.reason);
     });
-  </script>
+  </script> 
 
+ <!-- Main app -->
   <script type="module" src="./src/main.js"></script>
 </body>
-</html>
+</html> 
 
 

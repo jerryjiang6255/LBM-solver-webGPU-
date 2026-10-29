@@ -560,6 +560,8 @@ body {
   background: #060a10;
 }
 
+#overlay-canvas-1,
+#overlay-canvas-2,
 #particles-canvas-1,
 #body-canvas-1,
 #wall-canvas-1,
@@ -605,6 +607,13 @@ body {
 #flow-canvas-1,
 #flow-canvas-2 {
   position: relative;
+  z-index: 1;
+}
+
+/* WebGPU: vector / grid / distribution overlays sit directly on the
+   field (the CPU version draws them into the field canvas itself). */
+#overlay-canvas-1,
+#overlay-canvas-2 {
   z-index: 1;
 }
 
