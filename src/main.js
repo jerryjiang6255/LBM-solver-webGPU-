@@ -52,9 +52,9 @@
     // The GPU version runs every fidelity level at higher resolution
     // than the CPU version (CPU: 160x80 / 256x128 / 512x256).
     const GRID_PRESETS = {
-      low:  { NX: 256,  NY: 128 },
-      mid:  { NX: 512,  NY: 256 },
-      high: { NX: 1024, NY: 512 },
+      low:  { NX: 512,  NY: 256 },
+      mid:  { NX: 1024, NY: 512 },
+      high: { NX: 2048, NY: 1024 },
     };
 
     const U_COFLOW = 0.005;
