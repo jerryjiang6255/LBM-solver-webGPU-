@@ -20,11 +20,7 @@
       setCharacteristicLength,
       getInletVelocity
     } from "./simInstance.js";
-    import {
-      applyBoundaryConditions,
-      setNozzleInlet,
-      clearNozzleInlet
-    } from "./boundary.js";
+    import { applyBoundaryConditions } from "./boundary.js";
     import { BodyRenderer } from "./renderBody.js";
     import { createUserDraw } from "./userDraw.js";
     import { createConvergenceMonitor } from "./convergenceMonitor.js";
@@ -34,33 +30,42 @@
     import { GpuSim } from "./gpu/gpuSim.js";
     import { FieldRenderer } from "./gpu/fieldRenderer.js";
     import {
-      buildAirfoil,
-      buildNACA2412,
-      buildEmpty,
-      defaultBlockMatrix,
-      buildNozzle,
-      buildCylinder,
-      buildSquareCylinder,
-      buildLidDrivenCavity
-    } from "./geometry.js";
+      CS_LATTICE,
+      CYLINDER,
+      AOA_BODIES,
+      characteristicLength,
+      resolveGeometry as resolveCaseGeometry,
+    } from "./caseSpec.js";
 
     const gpu = await initGpu();
 
     // =====================================================
     // Constants / global state
     // =====================================================
-    // The GPU version runs every fidelity level at higher resolution
-    // than the CPU version (CPU: 160x80 / 256x128 / 512x256).
+    // Fidelity presets, lowest to highest. Each level doubles the grid in
+    // both directions. ML models run at Low; capture runs at Mid / High /
+    // Ultra (resolution ratio r = 2 / 4 / 8). Ultra is hidden when the
+    // device's buffer limits cannot hold it, and disabled in compare mode.
     const GRID_PRESETS = {
-      low:  { NX: 512,  NY: 256 },
-      mid:  { NX: 1024, NY: 512 },
-      high: { NX: 2048, NY: 1024 },
+      low:   { NX: 256,  NY: 128 },
+      mid:   { NX: 512,  NY: 256 },
+      high:  { NX: 1024, NY: 512 },
+      ultra: { NX: 2048, NY: 1024 },
     };
+    const GRID_ORDER = ["low", "mid", "high", "ultra"];
+    const DEFAULT_GRID_KEY = "high";
 
-    const U_COFLOW = 0.005;
-    const CS_LATTICE = 1 / Math.sqrt(3);
+    // Largest per-sim buffers are the populations (N * 9 * f32).
+    function gridFitsDevice({ NX, NY }) {
+      const bytes = NX * NY * 9 * 4;
+      const lim = gpu.device.limits;
+      return bytes <= lim.maxStorageBufferBindingSize && bytes <= lim.maxBufferSize;
+    }
+    const ultraAvailable = gridFitsDevice(GRID_PRESETS.ultra);
 
-    let currentGridKey = "mid";
+
+    let currentGridKey = DEFAULT_GRID_KEY;
+    let preCompareGridKey = null;   // restored when compare mode ends
     let sandboxActive = false;
     let sandboxMode = "draw";
     let smokeVisible = false;
@@ -100,10 +105,6 @@
     const monitorForceBtn2 = document.getElementById("monitor-force-btn-2");
 
     const aoaRow = document.getElementById("aoa-row");
-    const nozzleRow = document.getElementById("nozzle-row");
-    const cavityRow = document.getElementById("cavity-row");
-    const nozzleSlider = document.getElementById("nozzle-slider");
-    const nozzleOutput = document.getElementById("nozzle-value");
     const cylinderRow = document.getElementById("cylinder-row");
     const cylinderSlider = document.getElementById("cylinder-slider");
     const cylinderOutput = document.getElementById("cylinder-value");
@@ -121,15 +122,10 @@
     const pauseBtn = document.getElementById("pause-btn");
     const tooltip = document.getElementById("tooltip");
 
-    const cavityAspectRow = document.getElementById("cavity-aspect-row");
-    const cavityAspectSlider = document.getElementById("cavity-aspect-slider");
-    const cavityAspectValue = document.getElementById("cavity-aspect-value");
-
-
     // =====================================================
     // UI groups / mappings
     // =====================================================
-    const gridGroup = ["grid-low", "grid-mid", "grid-high"];
+    const gridGroup = GRID_ORDER.map(key => `grid-${key}`);
     const modeGroup = ["mode-speed", "mode-qcrit"];
 
     const bodyGroup = [
@@ -137,8 +133,6 @@
       "body-naca2412",
       "body-cylinder",
       "body-square-cylinder",
-      "body-lid-driven-cavity",
-      "body-nozzle",
       "body-blocks",
       "body-empty"
     ]; 
@@ -158,8 +152,6 @@
           "body-naca2412": "naca2412",
           "body-cylinder": "cylinder",
           "body-square-cylinder": "square-cylinder",
-          "body-lid-driven-cavity": "lid-driven-cavity",
-          "body-nozzle": "nozzle",
           "body-blocks": "blocks",
           "body-empty": "empty",
         },
@@ -213,9 +205,7 @@
 
     const TARGET_CONTROL_SLIDERS = [
       "aoa-slider",
-      "nozzle-slider",
       "cylinder-slider",
-      "cavity-aspect-slider",
       "u0-slider",
       "pulse-amp-slider",
       "pulse-freq-slider",
@@ -257,7 +247,7 @@
       return {
         pulsationOn: document.getElementById("pulse-on").classList.contains("active"),
         pulsationAmp: parseFloat(pulseAmpSlider.value),
-        pulsationFreq: parseFloat(pulseFreqSlider.value),
+        pulsationSt: parseFloat(pulseFreqSlider.value),
       };
     }
 
@@ -265,51 +255,13 @@
       return GRID_PRESETS[currentGridKey];
     }
 
+    // Reynolds length in cells for the current fidelity (caseSpec.js).
     function getCharacteristicLengthForBody(simLike) {
-      const { NX, NY } = currentDims();
-      const bodyType = simLike?.params?.bodyType ?? "airfoil";
-
-      if (bodyType === "airfoil" || bodyType === "naca2412") {
-        return Math.floor(NX / 3);
-      }
-
-      if (bodyType === "cylinder") {
-        const diameter = simLike?.params?.cylinderDiameter ?? parseInt(document.getElementById("cylinder-slider")?.value || "32", 10);
-        return diameter;
-      }
-
-      if (bodyType === "square-cylinder") {
-        return Math.max(8, Math.floor(NY / 4));
-      }
-
-    if (bodyType === "lid-driven-cavity") {
-        const wallThickness = 1;
-        const cavityAspect = simLike?.params?.cavityAspect ?? parseFloat(cavityAspectSlider.value);
-
-        const outerLeft   = wallThickness;
-        const outerRight  = NX - 1 - wallThickness;
-        const outerBottom = wallThickness;
-        const outerTop    = NY - 1 - wallThickness;
-
-        const cavityHeight = (outerTop - outerBottom) + 1 - 2 * wallThickness;
-        const cavityWidth = Math.max(4, Math.round(cavityHeight * cavityAspect));
-
-        const midX = 0.5 * (outerLeft + outerRight);
-        const cavityLeftInner  = Math.round(midX - cavityWidth / 2);
-        const cavityRightInner = Math.round(midX + cavityWidth / 2);
-
-        return (cavityRightInner - cavityLeftInner) - 1;
-      }
-
-      if (bodyType === "nozzle") {
-        return simLike?.params?.nozzleDiameter ?? parseInt(nozzleSlider.value, 10);
-      }
-
-      if (bodyType === "blocks") {
-        return 16;
-      }
-
-      return Math.max(4, Math.floor(NY / 8)) * 2;
+      const params = simLike?.params ?? {
+        bodyType: "airfoil",
+        cylinderDH: parseFloat(cylinderSlider.value),
+      };
+      return characteristicLength(params, currentDims());
     }
 
     function computeReBounds(u0, L) {
@@ -369,14 +321,29 @@
       document.getElementById("nodes-value").textContent = (NX * NY).toLocaleString();
     }
 
+    // Compare mode runs two sims, so it drops one level (Low stays Low).
     function dropFidelity(currentKey) {
-      if (currentKey === "high") return "mid";
-      return "low";
+      const i = GRID_ORDER.indexOf(currentKey);
+      return GRID_ORDER[Math.max(0, i - 1)];
     }
 
     function raiseFidelity(currentKey) {
-      if (currentKey === "low") return "mid";
-      return "high";
+      const i = GRID_ORDER.indexOf(currentKey);
+      const top = ultraAvailable ? GRID_ORDER.length - 1 : GRID_ORDER.length - 2;
+      return GRID_ORDER[Math.min(top, i + 1)];
+    }
+
+    function gridSelectable(key) {
+      if (key !== "ultra") return true;
+      return ultraAvailable && !compareMode;
+    }
+
+    function updateGridButtons() {
+      const ultraBtn = document.getElementById("grid-ultra");
+      if (!ultraBtn) return;
+      ultraBtn.style.display = ultraAvailable ? "" : "none";
+      ultraBtn.disabled = !gridSelectable("ultra");
+      ultraBtn.classList.toggle("disabled", ultraBtn.disabled);
     }
 
     function setActiveBtn(ids, activeId) {
@@ -433,17 +400,7 @@
     }
     function updateVelocityLabel() {
       const label = document.getElementById("u0-label");
-      if (!label) return;
-
-      const mode = activeTargetMode();
-      let refSim = sim1;
-      if (compareMode && mode === "flow2" && sim2) refSim = sim2;
-      if (compareMode && mode === "both" && lastTargetedFlow === 2 && sim2) refSim = sim2;
-
-      label.textContent =
-        refSim?.params?.bodyType === "lid-driven-cavity"
-          ? "Lid velocity"
-          : "Inlet velocity";
+      if (label) label.textContent = "Inlet velocity";
     }
 
     function renderCompareGroup(groupConfig) {
@@ -499,24 +456,18 @@
       });
     }
 
+    // "0.125 · 16 cells": D/H plus the diameter at the current fidelity.
+    function formatDOverH(v) {
+      const cells = Number(v) * currentDims().NY;
+      return `${Number(v).toFixed(3)} · ${cells.toFixed(cells % 1 === 0 ? 0 : 1)} cells`;
+    }
+
     function getSliderState(id) {
       switch (id) {
         case "aoa-slider":
           return {
             getValue(sim) { return sim?.params?.aoaDeg ?? 0; },
             setValueText(v) { document.getElementById("aoa-value").textContent = `${v.toFixed(1)}°`; },
-          };
-
-        case "nozzle-slider":
-          return {
-            getValue(sim) { return sim?.params?.nozzleDiameter ?? 16; },
-            setValueText(v) { nozzleOutput.textContent = `${Math.round(v)}`; },
-          };
-        
-        case "cavity-aspect-slider":
-          return {
-            getValue(sim) { return sim?.params?.cavityAspect ?? 1.0; },
-            setValueText(v) { cavityAspectValue.textContent = Number(v).toFixed(2); },
           };
 
         case "u0-slider":
@@ -530,8 +481,8 @@
 
         case "cylinder-slider":
           return {
-            getValue(sim) { return sim?.params?.cylinderDiameter ?? 32; },
-            setValueText(v) { cylinderOutput.textContent = `${Math.round(v)}`; },
+            getValue(sim) { return sim?.params?.cylinderDH ?? CYLINDER.defaultDOverH; },
+            setValueText(v) { cylinderOutput.textContent = formatDOverH(v); },
           };
 
         case "pulse-amp-slider":
@@ -542,8 +493,8 @@
 
         case "pulse-freq-slider":
           return {
-            getValue(sim) { return sim?.flow?.pulsationFreq ?? 0.010; },
-            setValueText(v) { pulseFreqValue.textContent = v.toFixed(3); },
+            getValue(sim) { return sim?.flow?.pulsationSt ?? 0.2; },
+            setValueText(v) { pulseFreqValue.textContent = v.toFixed(2); },
           };
 
         case "re-slider":
@@ -639,22 +590,9 @@
     }
 
     function updateBodyRows(type) {
-      const aoaBodies = new Set(["airfoil", "naca2412", "square-cylinder"]);
-
-      if (aoaRow) aoaRow.style.display = aoaBodies.has(type) ? "" : "none";
-      if (nozzleRow) nozzleRow.style.display = type === "nozzle" ? "" : "none";
-      if (typeof cylinderRow !== "undefined" && cylinderRow) {
-        cylinderRow.style.display = type === "cylinder" ? "" : "none";
-      }
-      if (cavityRow) cavityRow.style.display = type === "lid-driven-cavity" ? "" : "none";
-      if (typeof cavityAspectRow !== "undefined" && cavityAspectRow) {
-        cavityAspectRow.style.display = type === "lid-driven-cavity" ? "" : "none";
-      }
+      if (aoaRow) aoaRow.style.display = AOA_BODIES.has(type) ? "" : "none";
+      if (cylinderRow) cylinderRow.style.display = type === "cylinder" ? "" : "none";
     }
-
-
-
-
 
     function syncTargetUI() {
       updateFlowLabels();
@@ -669,7 +607,6 @@
       let refSim = sim1;
       if (compareMode && mode === "flow2" && sim2) refSim = sim2;
       if (compareMode && mode === "both" && lastTargetedFlow === 2 && sim2) refSim = sim2;
-      if (refSim) updateBodyRows(refSim.params.bodyType);
       if (refSim) updateBodyRows(refSim.params.bodyType);
       updateReSliderBounds();
 
@@ -820,9 +757,7 @@
         NY,
         bodyType,
         aoaDeg,
-        nozzleDiameter: overrides.nozzleDiameter ?? parseInt(nozzleSlider.value, 10),
-        cylinderDiameter: overrides.cylinderDiameter ?? parseInt(document.getElementById("cylinder-slider")?.value || "32", 10),
-        cavityAspect: overrides.cavityAspect ?? parseFloat(cavityAspectSlider.value),
+        cylinderDH: overrides.cylinderDH ?? parseFloat(cylinderSlider.value),
         u0: overrides.u0 ?? parseFloat(document.getElementById("u0-slider").value),
         reynolds: overrides.reynolds ?? parseFloat(document.getElementById("re-slider").value),
         displayMode: document.getElementById("mode-qcrit").classList.contains("active") ? "qcrit" : "speed",
@@ -833,8 +768,6 @@
         showDist: document.getElementById("dist-btn").classList.contains("active"),
         stepsPerFrame: parseInt(document.getElementById("steps-slider").value, 10),
         running: document.getElementById("pause-btn").textContent !== "Resume",
-        nozzleCy: Math.floor(NY / 2),
-        uCoflow: U_COFLOW,
 
         collisionModel: overrides.collisionModel ?? physicsUI.collisionModel,
         lesModel: overrides.lesModel ?? physicsUI.lesModel,
@@ -842,7 +775,7 @@
 
         pulsationOn: overrides.pulsationOn ?? flowUI.pulsationOn,
         pulsationAmp: overrides.pulsationAmp ?? flowUI.pulsationAmp,
-        pulsationFreq: overrides.pulsationFreq ?? flowUI.pulsationFreq,
+        pulsationSt: overrides.pulsationSt ?? flowUI.pulsationSt,
       });
     }
 
@@ -857,7 +790,6 @@
         prevSim1 ? prevSim1.params.bodyType : "airfoil",
         prevSim1 ? prevSim1.params.aoaDeg : 10,
         prevSim1 ? {
-          nozzleDiameter: prevSim1.params.nozzleDiameter,
           u0: prevSim1.params.u0,
           reynolds: prevSim1.params.reynolds,
           collisionModel: prevSim1.physics.collisionModel,
@@ -865,9 +797,8 @@
           wallModel: prevSim1.physics.wallModel,
           pulsationOn: prevSim1.flow.pulsationOn,
           pulsationAmp: prevSim1.flow.pulsationAmp,
-          pulsationFreq: prevSim1.flow.pulsationFreq,
-          cylinderDiameter: prevSim1.params.cylinderDiameter,
-          cavityAspect: prevSim1.params.cavityAspect,
+          pulsationSt: prevSim1.flow.pulsationSt,
+          cylinderDH: prevSim1.params.cylinderDH,
 
         } : {}
       );
@@ -882,7 +813,6 @@
           prevSim2 ? prevSim2.params.bodyType : "naca2412",
           prevSim2 ? prevSim2.params.aoaDeg : 10,
           prevSim2 ? {
-            nozzleDiameter: prevSim2.params.nozzleDiameter,
             u0: prevSim2.params.u0,
             reynolds: prevSim2.params.reynolds,
             collisionModel: prevSim2.physics.collisionModel,
@@ -890,9 +820,8 @@
             wallModel: prevSim2.physics.wallModel,
             pulsationOn: prevSim2.flow.pulsationOn,
             pulsationAmp: prevSim2.flow.pulsationAmp,
-            pulsationFreq: prevSim2.flow.pulsationFreq,
-            cylinderDiameter: prevSim2.params.cylinderDiameter,
-            cavityAspect: prevSim2.params.cavityAspect,
+            pulsationSt: prevSim2.flow.pulsationSt,
+            cylinderDH: prevSim2.params.cylinderDH,
 
           } : {}
         );
@@ -915,121 +844,13 @@
    // =====================================================
     // Geometry
     // =====================================================
+    // Geometry, Reynolds length and force reference all come from the
+    // resolution-independent case description (caseSpec.js).
     function resolveGeometry(sim) {
-      const dims = { NX: sim.NX, NY: sim.NY };
-      const bodyType = sim.params.bodyType;
-      const aoaDeg = sim.params.aoaDeg;
-      const nozzleDiameter = sim.params.nozzleDiameter;
-      const alpha = aoaDeg * Math.PI / 180;
-
-      if (bodyType === "airfoil") {
-        const chord = Math.floor(sim.NX / 3);
-        const acx = Math.floor(sim.NX / 3);
-        const acy = Math.floor(sim.NY / 2);
-        const result = buildAirfoil(dims, acx, acy, chord, alpha);
-
-        return {
-          g: result.geometry,
-          p: { type: "airfoil", cx: acx, cy: acy, chord, alpha, profile: "0012" },
-          charLength: result.charLength
-        };
-      }
-
-      if (bodyType === "naca2412") {
-        const chord = Math.floor(sim.NX / 3);
-        const acx = Math.floor(sim.NX / 3);
-        const acy = Math.floor(sim.NY / 2);
-        const result = buildNACA2412(dims, acx, acy, chord, alpha);
-
-        return {
-          g: result.geometry,
-          p: { type: "naca2412", cx: acx, cy: acy, chord, alpha, profile: "2412" },
-          charLength: result.charLength
-        };
-      }
-
-      if (bodyType === "square-cylinder") {
-        const cx = Math.floor(sim.NX / 4);
-        const cy = Math.floor(sim.NY / 2);
-        const size = Math.max(8, Math.floor(sim.NY / 4));
-        const result = buildSquareCylinder(dims, cx, cy, size, alpha);
-
-        return {
-          g: result.geometry,
-          p: { type: "square-cylinder", cx, cy, size, alpha },
-          charLength: result.charLength
-        };
-      }
-
-     if (bodyType === "lid-driven-cavity") {
-        const cavityAspect = sim.params.cavityAspect ?? parseFloat(cavityAspectSlider.value);
-        const result = buildLidDrivenCavity(dims, cavityAspect);
-
-        return {
-          g: result.geometry,
-          p: {
-            type: "lid-driven-cavity",
-            wallThickness: result.wallThickness,
-            cavityAspect: result.cavityAspect
-          },
-          charLength: result.charLength
-        };
-      }
-
-      if (bodyType === "empty") {
-        const result = buildEmpty(dims);
-        return {
-          g: result.geometry,
-          p: { type: "empty" },
-          charLength: result.charLength
-        };
-      }
-
-      if (bodyType === "blocks") {
-        const r = defaultBlockMatrix(dims);
-        return {
-          g: r.geometry,
-          p: { type: "blocks", blocks: r.blocks, blockSize: r.blockSize },
-          charLength: r.charLength
-        };
-      }
-
-      if (bodyType === "nozzle") {
-        const result = buildNozzle(dims, Math.floor(sim.NY / 2), nozzleDiameter);
-        return {
-          g: result.geometry,
-          p: {
-            type: "nozzle",
-            cy: result.cy,
-            diameter: result.diameter,
-            length: result.length
-          },
-          charLength: result.charLength
-        };
-      }
-
-     if (bodyType === "cylinder") {
-        const cx = Math.floor(sim.NX / 4);
-        const cy = Math.floor(sim.NY / 2);
-        const diameter = sim.params.cylinderDiameter ?? Math.max(8, Math.floor(sim.NY / 4));
-        const radius = diameter * 0.5;
-        const result = buildCylinder(dims, cx, cy, radius);
-
-        return {
-          g: result.geometry,
-          p: {
-            type: "cylinder",
-            cx,
-            cy,
-            radius
-          },
-          charLength: result.charLength
-        };
-      }
-
+      return resolveCaseGeometry(sim.params, { NX: sim.NX, NY: sim.NY });
     }
 
-    function applyGeometry(sim, { g, p, charLength }) {
+    function applyGeometry(sim, { g, p, charLength, refLength, forceRef }) {
       setCharacteristicLength(sim, charLength);
 
       sim.solidBase = g.solid;
@@ -1040,70 +861,18 @@
       sim.linkQ = g.linkQ;
       sim.solidList = g.solidList;
       sim.fluidSurfaceList = g.fluidSurfaceList;
-
-      // Signed distance field: needed by forceSurface.js to estimate the
-      // local body normal used by the normal-filtered momentum exchange.
       sim.sdf = g.sdf;
 
-      // ---------------------------------------------------
-      // Force reference point / coefficient reference length
-      // ---------------------------------------------------
-      // The dynamic pressure 0.5*rho*u0^2 is evaluated live in
-      // forceSurface.js from the current inlet velocity, so only the
-      // reference length is fixed here.
-      let refLength;
-
-      if (p.type === "airfoil" || p.type === "naca2412") {
-        sim.forceRef.x = p.cx - p.chord / 4;
-        sim.forceRef.y = p.cy;
-        refLength = p.chord;
-
-      } else if (p.type === "cylinder") {
-        sim.forceRef.x = p.cx;
-        sim.forceRef.y = p.cy;
-        refLength = 2 * p.radius;
-
-      } else if (p.type === "square-cylinder") {
-        sim.forceRef.x = p.cx;
-        sim.forceRef.y = p.cy;
-        refLength = p.size;
-
-      } else if (p.type === "lid-driven-cavity") {
-        sim.forceRef.x = sim.NX * 0.5;
-        sim.forceRef.y = sim.NY * 0.5;
-        refLength = charLength || sim.L || 1.0;
-
-      } else if (p.type === "nozzle") {
-        sim.forceRef.x = p.length * 0.5;
-        sim.forceRef.y = p.cy;
-        refLength = p.diameter;
-
-      } else if (p.type === "blocks") {
-        sim.forceRef.x = sim.NX * 0.5;
-        sim.forceRef.y = sim.NY * 0.5;
-        refLength = charLength || sim.L || 1.0;
-
-      } else {
-        sim.forceRef.x = 0.0;
-        sim.forceRef.y = 0.0;
-        refLength = Math.max(charLength || sim.L || 1.0, 1.0);
-      }
-
-      sim.forceRefLength = refLength;
+      // Moment reference point / coefficient reference length. The
+      // dynamic pressure is evaluated from u0 in handleDiagnostics.
+      sim.forceRef.x = forceRef.x;
+      sim.forceRef.y = forceRef.y;
+      sim.forceRefLength = Math.max(refLength || sim.L || 1.0, 1.0);
 
       if (sim.bodyRenderer) {
         sim.bodyRenderer.clear();
         if (sim.params.bodyType !== "empty") {
           sim.bodyRenderer.draw(p);
-        }
-      }
-
-
-      if (sim.nozzle) {
-        if (sim.params.bodyType === "nozzle") {
-          setNozzleInlet(sim, Math.floor(sim.NY / 2), sim.params.nozzleDiameter, U_COFLOW);
-        } else {
-          clearNozzleInlet(sim);
         }
       }
 
@@ -1374,6 +1143,7 @@
       if (compareMode) {
         canvasWrap2.offsetWidth;
 
+        preCompareGridKey = currentGridKey;
         const droppedKey = dropFidelity(currentGridKey);
         if (droppedKey !== currentGridKey) {
           currentGridKey = droppedKey;
@@ -1397,7 +1167,10 @@
         target2Active = true;
         lastTargetedFlow = 1;
       } else {
-        const raisedKey = raiseFidelity(currentGridKey);
+        // Restore the level from before compare mode, unless the user
+        // picked another level while comparing (then go one level up).
+        const raisedKey = preCompareGridKey ?? raiseFidelity(currentGridKey);
+        preCompareGridKey = null;
         if (raisedKey !== currentGridKey) {
           currentGridKey = raisedKey;
           setActiveBtn(gridGroup, `grid-${raisedKey}`);
@@ -1418,6 +1191,8 @@
         target2Active = true;
         lastTargetedFlow = 1;
       }
+
+      updateGridButtons();
 
       requestAnimationFrame(() => {
         resizeOverlayCanvases();
@@ -1465,10 +1240,8 @@
     document.getElementById("body-airfoil").addEventListener("click", () => switchBody("airfoil"));
     document.getElementById("body-naca2412").addEventListener("click", () => switchBody("naca2412"));
     document.getElementById("body-square-cylinder").addEventListener("click", () => switchBody("square-cylinder"));
-    document.getElementById("body-lid-driven-cavity").addEventListener("click", () => switchBody("lid-driven-cavity"));
     document.getElementById("body-blocks").addEventListener("click", () => switchBody("blocks"));
     document.getElementById("body-empty").addEventListener("click", () => switchBody("empty"));
-    document.getElementById("body-nozzle").addEventListener("click", () => switchBody("nozzle"));
 
 
     document.getElementById("aoa-slider").addEventListener("input", e => {
@@ -1477,22 +1250,7 @@
 
       targetedSims().forEach(sim => {
         sim.params.aoaDeg = aoaDeg;
-        if (["airfoil", "naca2412", "square-cylinder"].includes(sim.params.bodyType)) {
-          rebuildGeometryOnly(sim);
-        }
-      });
-
-      syncTargetUI();
-    });
-
-    nozzleSlider.addEventListener("input", () => {
-      const nozzleDiameter = parseInt(nozzleSlider.value, 10);
-      nozzleOutput.textContent = nozzleDiameter;
-
-      targetedSims().forEach(sim => {
-        sim.params.nozzleDiameter = nozzleDiameter;
-        if (sim.params.bodyType === "nozzle") {
-          setNozzleInlet(sim, Math.floor(sim.NY / 2), nozzleDiameter, U_COFLOW);
+        if (AOA_BODIES.has(sim.params.bodyType)) {
           rebuildGeometryOnly(sim);
         }
       });
@@ -1501,11 +1259,11 @@
     });
 
     cylinderSlider.addEventListener("input", () => {
-      const diameter = parseInt(cylinderSlider.value, 10);
-      cylinderOutput.textContent = diameter;
+      const dOverH = parseFloat(cylinderSlider.value);
+      cylinderOutput.textContent = formatDOverH(dOverH);
 
       targetedSims().forEach(sim => {
-        sim.params.cylinderDiameter = diameter;
+        sim.params.cylinderDH = dOverH;
         if (sim.params.bodyType === "cylinder") {
           rebuildGeometryOnly(sim);
         }
@@ -1513,23 +1271,6 @@
 
       syncTargetUI();
     });
-
-    cavityAspectSlider.addEventListener("input", () => {
-      const aspect = parseFloat(cavityAspectSlider.value);
-      cavityAspectValue.textContent = aspect.toFixed(2);
-
-      targetedSims().forEach(sim => {
-        sim.params.cavityAspect = aspect;
-        if (sim.params.bodyType === "lid-driven-cavity") {
-          rebuildGeometryOnly(sim);
-        }
-      });
-
-      syncTargetUI();
-    });
-
-
-
 
    // =====================================================
     // Flow controls
@@ -1599,11 +1340,11 @@
     });
 
     pulseFreqSlider.addEventListener("input", e => {
-      const freq = parseFloat(e.target.value);
-      pulseFreqValue.textContent = freq.toFixed(3);
+      const st = parseFloat(e.target.value);
+      pulseFreqValue.textContent = st.toFixed(2);
 
       targetedSims().forEach(sim => {
-        sim.flow.pulsationFreq = freq;
+        sim.flow.pulsationSt = st;
       });
 
       syncTargetUI();
@@ -1757,22 +1498,14 @@
    // =====================================================
     // Fidelity
     // =====================================================
-    document.getElementById("grid-low").addEventListener("click", () => {
-      currentGridKey = "low";
-      setActiveBtn(gridGroup, "grid-low");
-      recreateSims();
-    });
-
-    document.getElementById("grid-mid").addEventListener("click", () => {
-      currentGridKey = "mid";
-      setActiveBtn(gridGroup, "grid-mid");
-      recreateSims();
-    });
-
-    document.getElementById("grid-high").addEventListener("click", () => {
-      currentGridKey = "high";
-      setActiveBtn(gridGroup, "grid-high");
-      recreateSims();
+    GRID_ORDER.forEach(key => {
+      document.getElementById(`grid-${key}`).addEventListener("click", () => {
+        if (!gridSelectable(key)) return;
+        currentGridKey = key;
+        preCompareGridKey = null;
+        setActiveBtn(gridGroup, `grid-${key}`);
+        recreateSims();
+      });
     });
 
     // =====================================================
@@ -1834,16 +1567,15 @@ document.getElementById("u0-value").textContent =
     document.getElementById("aoa-value").textContent =
       parseFloat(document.getElementById("aoa-slider").value).toFixed(1) + "°";
 
-    nozzleOutput.textContent = parseInt(nozzleSlider.value, 10);
-    cylinderOutput.textContent = parseInt(cylinderSlider.value, 10);
+    cylinderOutput.textContent = formatDOverH(parseFloat(cylinderSlider.value));
     pulseAmpValue.textContent = parseFloat(pulseAmpSlider.value).toFixed(2);
-    pulseFreqValue.textContent = parseFloat(pulseFreqSlider.value).toFixed(3);
-    cavityAspectValue.textContent = parseFloat(cavityAspectSlider.value).toFixed(2);
+    pulseFreqValue.textContent = parseFloat(pulseFreqSlider.value).toFixed(2);
 
 
     updateGridStats();
     setActiveBtn(modeGroup, "mode-speed");
-    setActiveBtn(gridGroup, "grid-mid");
+    setActiveBtn(gridGroup, `grid-${currentGridKey}`);
+    updateGridButtons();
 
     recreateSims();
 

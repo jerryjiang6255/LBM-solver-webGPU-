@@ -1,6 +1,7 @@
 // src/geometry.js
 // ============================================================
-// Compare-mode ready geometry builders.
+// Compare-mode ready geometry builders. Body placement and sizing
+// (fractions of the domain) live in caseSpec.js.
 // Updated for global fidelity presets: geometry no longer imports
 // fixed NX/NY/N from lbm.js. Dimensions are passed in explicitly.
 // ============================================================
@@ -32,52 +33,6 @@ function sdfNACA0012(cx, cy, chord, alpha) {
 function sdfNACA2412(cx, cy, chord, alpha) {
   return sdfNACA4(cx, cy, chord, alpha, 0.02, 0.4, 0.12);
 }
-
-function sdfLidDrivenCavity(NX, NY, wallThickness = 1, cavityAspect = 1.0) {
-  const outerLeft   = wallThickness;
-  const outerRight  = NX - 1 - wallThickness;
-  const outerBottom = wallThickness;
-  const outerTop    = NY - 1 - wallThickness;
-
-  // Center cavity height stays fixed by NY
-  const cavityHeight = (outerTop - outerBottom) + 1 - 2 * wallThickness;
-
-  // Width changes with aspect ratio; 1.0 gives square center cavity
-  const cavityWidth = Math.max(
-    4,
-    Math.round(cavityHeight * cavityAspect)
-  );
-
-  const midX = 0.5 * (outerLeft + outerRight);
-  const cavityLeftInner  = Math.round(midX - cavityWidth / 2);
-  const cavityRightInner = Math.round(midX + cavityWidth / 2);
-
-  return (x, y) => {
-    // Outer box walls
-    const inOuterFluid =
-      x >= outerLeft && x <= outerRight &&
-      y >= outerBottom && y <= outerTop;
-
-    if (!inOuterFluid) return -1.0;
-
-    // Top and bottom are continuous walls across full width
-    if (y <= outerBottom || y >= outerTop) return -1.0;
-
-    // Left and right outer walls
-    if (x <= outerLeft || x >= outerRight) return -1.0;
-
-    // Two inner vertical walls that define the center cavity
-    const inCenterBand = x >= cavityLeftInner && x <= cavityRightInner;
-
-    // Fluid everywhere except the wall columns themselves
-    if (x === cavityLeftInner || x === cavityRightInner) return -1.0;
-
-    // Interior fluid in all three compartments
-    return 1.0;
-  };
-}
-
-
 
 // ---------------------------------------------------------
 // sdfNACA4(...)
@@ -130,25 +85,6 @@ function sdfNACA4(cx, cy, chord, alpha, m, p, t) {
     const ySurf = yt * Math.cos(theta);
 
     return Math.abs(yRel) - ySurf;
-  };
-}
-
-// ---------------------------------------------------------
-// sdfNozzle(cy, diameter, length)
-// ---------------------------------------------------------
-function sdfNozzle(cy, diameter, length) {
-  const halfD = diameter / 2;
-  const wallThickness = 3;
-
-  return (x, y) => {
-    if (x > length) return 1.0;
-
-    const distFromCenter = Math.abs(y - cy);
-
-    if (distFromCenter <= halfD) return 1.0;
-    if (distFromCenter <= halfD + wallThickness) return -1.0;
-
-    return 1.0;
   };
 }
 
@@ -328,48 +264,6 @@ export function buildSquareCylinder(dims, cx, cy, size, alpha) {
   };
 }
 
-// ---------------------------------------------------------
-// buildLidDrivenCavity(dims)
-// ---------------------------------------------------------
-export function buildLidDrivenCavity(dims, cavityAspect = 1.0) {
-  const { NX, NY } = dims;
-  const wallThickness = 1;
-
-  const outerLeft   = wallThickness;
-  const outerRight  = NX - 1 - wallThickness;
-  const outerBottom = wallThickness;
-  const outerTop    = NY - 1 - wallThickness;
-
-  // Full interior height between top and bottom walls
-  const cavityHeight = (outerTop - outerBottom) + 1 - 2 * wallThickness;
-
-  // Center cavity width set by aspect ratio
-  const cavityWidth = Math.max(4, Math.round(cavityHeight * cavityAspect));
-
-  const midX = 0.5 * (outerLeft + outerRight);
-  const cavityLeftInner  = Math.round(midX - cavityWidth / 2);
-  const cavityRightInner = Math.round(midX + cavityWidth / 2);
-
-  // Characteristic length = center cavity interior width
-  const centerCavityLength = (cavityRightInner - cavityLeftInner) - 1;
-
-  return {
-    geometry: buildGeometryFromSDF(
-      dims,
-      sdfLidDrivenCavity(NX, NY, wallThickness, cavityAspect)
-    ),
-    wallThickness,
-    cavityAspect,
-    cavityWidth,
-    cavityHeight,
-    cavityLeftInner,
-    cavityRightInner,
-    charLength: centerCavityLength,
-  };
-}
-
-
-
 export function buildEmpty(dims) {
   return {
     geometry: buildGeometryFromSDF(dims, sdfEmpty()),
@@ -377,38 +271,11 @@ export function buildEmpty(dims) {
   };
 }
 
-export function defaultBlockMatrix(dims) {
-  const { NX, NY } = dims;
-  const blockSize = 4;
-
-  const colXs = [
-    Math.floor(NX * 0.30),
-    Math.floor(NX * 0.43),
-    Math.floor(NX * 0.56),
-    Math.floor(NX * 0.69),
-  ];
-
-  const rows4 = [
-    Math.floor(NY * 0.18),
-    Math.floor(NY * 0.38),
-    Math.floor(NY * 0.62),
-    Math.floor(NY * 0.82),
-  ];
-
-  const rows3 = [
-    Math.floor(NY * 0.28),
-    Math.floor(NY * 0.50),
-    Math.floor(NY * 0.72),
-  ];
-
-  const blocks = [];
-  for (const x of [colXs[0], colXs[2]]) {
-    for (const y of rows4) blocks.push([x, y]);
-  }
-  for (const x of [colXs[1], colXs[3]]) {
-    for (const y of rows3) blocks.push([x, y]);
-  }
-
+// ---------------------------------------------------------
+// buildBlocks(dims, blocks, blockSize)
+// blocks: array of [cx, cy] node coordinates (may be fractional).
+// ---------------------------------------------------------
+export function buildBlocks(dims, blocks, blockSize) {
   return {
     geometry: buildGeometryFromSDF(dims, sdfExplicitBlocks(blocks, blockSize)),
     blocks,
@@ -416,64 +283,3 @@ export function defaultBlockMatrix(dims) {
     charLength: blockSize * 4,
   };
 }
-
-export function defaultCylinder(dims) {
-  const { NX, NY } = dims;
-  const cx     = Math.floor(NX / 4);
-  const cy     = Math.floor(NY / 2);
-  const radius = Math.max(4, Math.floor(NY / 8));
-  return buildCylinder(dims, cx, cy, radius);
-}
-
-// ---------------------------------------------------------
-// defaultNACA2412(dims)
-// ---------------------------------------------------------
-export function defaultNACA2412(dims) {
-  const { NX, NY } = dims;
-  const chord = Math.floor(NX / 3);
-  const cx    = Math.floor(NX / 3);
-  const cy    = Math.floor(NY / 2);
-  return buildNACA2412(dims, cx, cy, chord, 0);
-}
-
-// ---------------------------------------------------------
-// defaultSquareCylinder(dims)
-// ---------------------------------------------------------
-export function defaultSquareCylinder(dims) {
-  const { NX, NY } = dims;
-  const cx   = Math.floor(NX / 4);
-  const cy   = Math.floor(NY / 2);
-  const size = Math.max(8, Math.floor(NY / 4));
-  return buildSquareCylinder(dims, cx, cy, size, 0);
-}
-
-// ---------------------------------------------------------
-// defaultLidDrivenCavity(dims)
-// ---------------------------------------------------------
-export function defaultLidDrivenCavity(dims) {
-  return buildLidDrivenCavity(dims, 1.0);
-}
-
-
-
-export function buildNozzle(dims, cy, diameter) {
-  const { NX } = dims;
-  const length = Math.floor(NX * 0.15);
-
-  return {
-    geometry: buildGeometryFromSDF(dims, sdfNozzle(cy, diameter, length)),
-    cy,
-    diameter,
-    length,
-    charLength: diameter,
-  };
-}
-
-export function defaultNozzle(dims) {
-  const { NY } = dims;
-  const cy       = Math.floor(NY / 2);
-  const diameter = Math.floor(NY / 4);
-  return buildNozzle(dims, cy, diameter);
-}
-
-

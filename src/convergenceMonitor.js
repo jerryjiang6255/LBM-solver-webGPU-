@@ -189,10 +189,6 @@ function activeMetricKeys() {
   if (state.mode === "forces") {
     const type = sim?.params?.bodyType;
 
-    if (type === "lid-driven-cavity") {
-      return ["uCenter", "vCenter"];
-    }
-
     const showMoment = shouldShowMoment(sim);
     const showSt = type === "cylinder" || type === "square-cylinder";
 
@@ -482,35 +478,9 @@ function activeMetricKeys() {
   // ---- coefficient + raw force readout — top right corner ----
    if (state.mode === "forces" && history.cd.length > 0 && history.cl.length > 0) {
       const showSt = sim?.params?.bodyType === "cylinder" || sim?.params?.bodyType === "square-cylinder";
-      const isCavity = sim?.params?.bodyType === "lid-driven-cavity";
 
       ctx.font = '500 9px "JetBrains Mono", monospace';
       ctx.textAlign = 'right';
-
-      if (isCavity) {
-        const uStats = waveStats(history.uCenter);
-        const vStats = waveStats(history.vCenter);
-
-        const lines = [
-          { label: "<Ucenter>", mean: uStats.mean, amp: uStats.amp, color: METRICS.uCenter.color },
-          { label: "<Vcenter>", mean: vStats.mean, amp: vStats.amp, color: METRICS.vCenter.color },
-        ];
-
-        let ry = top + 10;
-        for (const line of lines) {
-          ctx.fillStyle = line.color;
-          ctx.fillText(
-            `${line.label}: ${line.mean.toFixed(4)} ± ${line.amp.toFixed(4)}`,
-            right - 2,
-            ry
-          );
-          ry += 12;
-        }
-
-        ctx.textAlign = "left";
-        ctx.restore();
-        return;
-      }
 
       const cdStats = waveStats(history.cd);
       const clStats = waveStats(history.cl);

@@ -40,82 +40,6 @@ export class BodyRenderer {
       drawCylinder(ctx, params, sx, sy);
 
 
-      // -----------------------------------------------------
-    // Lid-driven cavity
-    // -----------------------------------------------------
-    } else if (params.type === "lid-driven-cavity") {
-      const wallThickness = params.wallThickness ?? 1;
-      const cavityAspect = params.cavityAspect ?? 1.0;
-
-      // Match geometry.js logic
-      const outerLeft   = wallThickness;
-      const outerRight  = this.NX - 1 - wallThickness;
-      const outerBottom = wallThickness;
-      const outerTop    = this.NY - 1 - wallThickness;
-
-      const cavityHeight = (outerTop - outerBottom) + 1 - 2 * wallThickness;
-      const cavityWidth = Math.max(4, Math.round(cavityHeight * cavityAspect));
-
-      const midX = 0.5 * (outerLeft + outerRight);
-      const cavityLeftInner  = Math.round(midX - cavityWidth / 2);
-      const cavityRightInner = Math.round(midX + cavityWidth / 2);
-
-      // Visual thickness bigger than lattice thickness so it fully covers the masked geometry
-      const tX = Math.max(wallThickness * sx, 14);
-      const tY = Math.max(wallThickness * sy, 14);
-
-      // Full outer cavity body
-      const outerX = outerLeft * sx;
-      const outerY = outerBottom * sy;
-      const outerW = (outerRight - outerLeft + 1) * sx;
-      const outerH = (outerTop - outerBottom + 1) * sy;
-
-      // Inner fluid opening for the full cavity
-      const innerX = outerX + tX;
-      const innerY = outerY + tY;
-      const innerW = outerW - 2 * tX;
-      const innerH = outerH - 2 * tY;
-
-      // Internal wall positions
-      const wall1X = cavityLeftInner * sx;
-      const wall2X = cavityRightInner * sx;
-      const wallW = Math.max(wallThickness * sx, 12);
-
-      const rOuter = Math.max(8, Math.min(outerW, outerH) * 0.025);
-      const rInner = Math.max(6, Math.min(innerW, innerH) * 0.02);
-
-      // One compound path:
-      // outer rounded box
-      // minus inner rounded cavity opening
-      // plus the two solid internal walls
-      ctx.beginPath();
-      ctx.roundRect(outerX, outerY, outerW, outerH, rOuter);
-      ctx.roundRect(innerX, innerY, innerW, innerH, rInner);
-      ctx.rect(wall1X - 0.5 * wallW, innerY, wallW, innerH);
-      ctx.rect(wall2X - 0.5 * wallW, innerY, wallW, innerH);
-
-      const grad = ctx.createLinearGradient(0, outerY, 0, outerY + outerH);
-      grad.addColorStop(0.0, "#48506a");
-      grad.addColorStop(0.45, "#1a1f2e");
-      grad.addColorStop(1.0, "#0a0d16");
-
-      ctx.fillStyle = grad;
-      ctx.fill("evenodd");
-
-      // Single clean outer outline
-      ctx.beginPath();
-      ctx.roundRect(outerX + 0.5, outerY + 0.5, outerW - 1, outerH - 1, rOuter);
-      ctx.strokeStyle = "rgba(175,198,230,0.78)";
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-
-      // Inner opening outline only
-      ctx.beginPath();
-      ctx.roundRect(innerX + 0.5, innerY + 0.5, innerW - 1, innerH - 1, rInner);
-      ctx.strokeStyle = "rgba(175,198,230,0.40)";
-      ctx.lineWidth = 1.1;
-      ctx.stroke();
-
     // -----------------------------------------------------
     // Airfoil families
     // -----------------------------------------------------
@@ -218,56 +142,6 @@ export class BodyRenderer {
         ctx.stroke();
       }
 
-    // -----------------------------------------------------
-    // Nozzle
-    // -----------------------------------------------------
-    } else if (params.type === "nozzle") {
-      const { cy, diameter, length } = params;
-      const halfD = diameter / 2;
-      const wallThickness = 4;
-
-      const topY1 = (cy - halfD - wallThickness) * sy;
-      const topY2 = (cy - halfD) * sy;
-      const botY1 = (cy + halfD) * sy;
-      const botY2 = (cy + halfD + wallThickness) * sy;
-      const endX  = (length + 0.9) * sx;
-
-      const gradTop = ctx.createLinearGradient(0, topY1, 0, topY2);
-      gradTop.addColorStop(0,   "#48506a");
-      gradTop.addColorStop(0.5, "#1a1f2e");
-      gradTop.addColorStop(1,   "#0a0d16");
-
-      const gradBot = ctx.createLinearGradient(0, botY1, 0, botY2);
-      gradBot.addColorStop(0,   "#0a0d16");
-      gradBot.addColorStop(0.5, "#1a1f2e");
-      gradBot.addColorStop(1,   "#48506a");
-
-      const startX = -10;
-
-      ctx.beginPath();
-      ctx.rect(startX, topY1, endX - startX, topY2 - topY1);
-      ctx.fillStyle = gradTop;
-      ctx.fill();
-      ctx.strokeStyle = "rgba(175,198,230,0.8)";
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.rect(startX, botY1, endX - startX, botY2 - botY1);
-      ctx.fillStyle = gradBot;
-      ctx.fill();
-      ctx.strokeStyle = "rgba(175,198,230,0.8)";
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(endX, topY1);
-      ctx.lineTo(endX, topY2);
-      ctx.moveTo(endX, botY1);
-      ctx.lineTo(endX, botY2);
-      ctx.strokeStyle = "rgba(175,198,230,0.8)";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
     }
 
     ctx.restore();

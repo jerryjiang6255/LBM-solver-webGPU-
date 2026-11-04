@@ -1,8 +1,8 @@
 # ML Plan: Physics-Informed CNN Correction for the WebGPU LBM Sandbox
 
-**Status:** draft for review (UI layout finalised) · **Repo baseline:** `jerryjiang6255/LBM-solver-webGPU-` @ `bc0b7c9` · **Date:** 2026-11-03
+**Status:** draft for review (UI layout finalised) · **Repo baseline:** `jerryjiang6255/LBM-solver-webGPU-` @ `62c3bb2` · **Date:** 2026-11-03
 
-Items marked **[DECIDE]** still need a decision. Items marked **[VERIFY]** need checking against the current code before implementation.
+Items marked **[DECIDE]** still need a decision. Items marked **[VERIFY]** needed checking against the code. **Code review 2026-11-03:** all [VERIFY] items are resolved (results inline and in §13). Each [DECIDE] item now carries a *Code suggests* note.
 
 **UI mockups:** design canvas "CFD page control bar with ML updates" (https://claude.ai/artifact/4b3ka8gFMs2S8hnxvqXQRy): CFD page bar, training page bar with monitor/dataset windows, Classic view, Feature maps view. Section 8 describes them.
 
@@ -54,9 +54,22 @@ macro (ρ, u) → ML inputs → CNN → Π → collide → f* + Δf(Π) → stre
 | Mid | 512×256 | 131,072 |
 | Low (new size) | 256×128 | 32,768 |
 
-**This is a remap, not just an added button.** The current code has `low: 512×256, mid: 1024×512, high: 2048×1024` (`GRID_PRESETS` in `main.js`). Every level shifts down one name and a new 256×128 Low is added. **[VERIFY]** everything keyed on the old names (compare-mode fidelity drop, default fidelity, tooltips). **[DECIDE]** the default fidelity (currently Mid, which becomes 512×256).
+**This is a remap, not just an added button.** The current code has `low: 512×256, mid: 1024×512, high: 2048×1024` (`GRID_PRESETS` in `main.js`). Every level shifts down one name and a new 256×128 Low is added. Ultra (2048×1024) is today's High renamed; **the only new grid size is 256×128.** **Done 2026-11-03.** Presets are Low 256×128 / Mid 512×256 / High 1024×512 / Ultra 2048×1024 (`GRID_PRESETS`, `GRID_ORDER` in `main.js`). Default is High (1024×512): the same grid as before, and the recommended capture fidelity. *Decided:* High, for now.
 
-- **Ultra:** check the adapter's buffer limits at startup and hide Ultra if it doesn't fit; disable it in compare mode.
+**Verified: sites keyed on the old names**
+- `main.js:54-58`: `GRID_PRESETS`.
+- `main.js:63`: default key `"mid"`.
+- `main.js:1844`: `setActiveBtn(gridGroup, "grid-mid")` at startup.
+- `main.js:132`: `gridGroup`.
+- `main.js:372-380`: `dropFidelity` / `raiseFidelity`. These are hard-coded for 3 levels and do not round-trip: entering compare mode at Low and leaving it lands on Mid.
+- `main.js:1377`, `main.js:1400`: the compare toggle.
+- `main.js:1758-1776`: per-button click handlers.
+- `index.html:246-249`: the button stack (Mid `active`).
+- Comment text at `main.js:52-53` and the footer at `index.html:350`.
+- The fidelity buttons now have tooltips giving grid size, node count and capture ratio.
+- Compare-mode rules (done): drop Ultra→High, High→Mid, Mid→Low, Low stays. The pre-compare level is restored on exit; if the user changes fidelity while comparing, exit goes up one level instead. Ultra is disabled while comparing.
+
+- **Ultra:** verified. `requestDevice()` requests no limits (`gpuContext.js:66`), so only the WebGPU defaults apply: 128 MiB per binding, 256 MiB per buffer, 8 storage buffers per stage. The largest Ultra buffers (fA, fB, linkQ) are 75.5 MB each and fit; today's High already runs at this size. Check `device.limits` (not the adapter's limits) at startup. The real risk is **VRAM**: ~330 MB+ per sim, plus ~250 MB of transient CPU arrays during setup. Handle device-lost or out-of-memory by hiding Ultra. Disable Ultra in compare mode.
 - Models always **run at Low (256×128)**.
 - The capture's high resolution is whatever fidelity the CFD page is on when capturing. **Capture and Sweep are disabled at Low and in compare mode.**
 
@@ -75,7 +88,29 @@ With ratio r, the same inlet velocity in lattice units, and geometry scaled by r
 - viscosity matched for the same Re: $\tau_{hi} = 0.5 + r(\tau_{lo} - 0.5)$;
 - body size in cells: r times larger at high res.
 
-**[VERIFY]** how the current presets set u0, τ (ν0) and body size per fidelity, and that the low-res and high-res runs of a case really have the same Re and physically aligned geometry. Check by overlaying the shrunk high-res solid mask on the low-res mask.
+**Verified: what the code does today**
+- u0 is a lattice-unit slider, the same at every fidelity. `NU0 = u0·L/Re` (`simInstance.js:38-42`). So whenever L scales by r, the τ_hi formula above holds automatically. ✔
+- Body size (`main.js:918-1029`):
+  - NACA0012/2412: chord and x = `floor(NX/3)`, which scales. 341 vs 4·85 = 340, so it is off by ¼ low-res cell.
+  - Square: `NY/4`, which scales exactly.
+  - **Cylinder: diameter = slider value in cells** (`main.js:1014`). It does **not** scale.
+  - **Blocks: `blockSize = 4` and `charLength = 16`, both fixed** (`geometry.js:380-418`). They do not scale.
+  - Empty: L = NY.
+- **Sponge width is a fixed 28 cells** (`gpuSim.js:24`, `boundary.js:12`). At High that is 7 low-res cells versus 28 at Low.
+- **Pulse frequency is per lattice step** (`simInstance.js:130`).
+- **Block-average offset:** the centre of block i is at r·i + (r−1)/2 high-res cells. Bodies placed at the same fractional position at both resolutions therefore shrink to an offset of (r−1)/(2r) low-res cells (0.375 at r = 4).
+- **Silent τ clamp:** the shader clamps τ to ≥ 0.545 (`solver.wgsl:31`). If τ_lo is clamped, Low and High run at different effective Re. The UI caps Re (`computeReBounds`, `main.js:315`), but `createSim` passes the previous Re through before the cap runs.
+
+**Required changes (Phase 0a).** Done 2026-11-03, except the τ check, via `src/caseSpec.js`. Cases are defined in domain fractions (cylinder D/H, block size/H, chord/W, positions), the pulse by its Strouhal number f·L/U, and the sponge as a fraction of NX. Bodies are placed on the cell-centre convention, node i at continuous i + 0.5, so the shrink lines up with no offset term. The original list:
+- Define the cylinder diameter in Low cells and multiply it by r at higher fidelities.
+- Scale block size and `charLength` with r.
+- Make sponge width proportional to NX, in both `gpuSim.js` and `boundary.js`.
+- High-res pulse frequency = f_lo / r.
+- Place high-res geometry at r·x_lo + (r−1)/2, or use a shrink stencil centred on r·i.
+- Capture auto-checks reject τ_lo < 0.545.
+- Verify by overlaying the shrunk high-res solid mask on the low-res mask.
+
+**Reachable Re at Low** is Re_max = u0·L/0.015. At u0 = 0.1732, an airfoil (chord 85) caps at ≈ 980. A cylinder needs D_lo ≥ 18 for Re 200; D_lo = 32 gives 25% blockage at NY = 128. This bounds every model's training range.
 
 ### 2.3 Physics settings during capture, training and runtime
 
@@ -85,13 +120,20 @@ The current default has **Smagorinsky LES on** (`les-smag` active). An LES model
 - **A (recommended):** capture high-res with **LES off** where stable; run the low-res training step and the runtime with a **fixed** setup (e.g. TRT, LES off, wall model off). The CNN learns the full subgrid correction.
 - **B:** keep Smagorinsky on at low res; the CNN learns the residual on top of it.
 
-Whichever is chosen: **training and runtime must use identical collision, LES, wall-model and BC settings**. Record them in the model card.
+*Code suggests:* option A with TRT.
+- Because Low caps Re via the τ ≥ 0.545 limit, τ_hi = 0.5 + r(τ_lo − 0.5) ≥ τ_lo always holds. So "LES off at high res where stable" holds for every case reachable at Low.
+- The wall model is a **no-op when LES is off** (`solver.wgsl:246`), so A effectively means TRT with LES off.
+- Option B would also break the fixed-τ reconstruction in §7.1.
+
+Whichever is chosen: **training and runtime must use identical collision, LES, wall-model and BC settings**. Record them in the model card. The §7.1 reconstruction assumes a fixed τ (no LES).
+
+Current UI defaults are TRT, Smag and Wall **On** (`simInstance.js:171-173`). The TRT and Wall buttons are not highlighted on load.
 
 **UI rule:** selecting a model on the CFD page **applies that model's physics settings and locks** the TRT/BGK, Smag/WALE and Wall buttons (tooltip: "set by ML2"). Clicking the model again turns it off and unlocks them.
 
-**Re and inlet velocity** are both sliders (Flow tab). τ is computed from Re, u0, body size and fidelity. Clamp the Re slider's maximum so τ stays above the stability limit for the current u0 and fidelity (stricter at Low), and explain the limit in a tooltip.
+**Re and inlet velocity** are both sliders (Flow tab). τ is computed from Re, u0, body size and fidelity. The Re clamp **already exists** (`computeReBounds` / `updateReSliderBounds`, `main.js:315-362`, using TAU_MIN 0.545). Reuse it, apply it when sims are created as well, and show the Low-reachable Re range in the tooltip.
 
-The pulsing inlet depends on the step count, so record step numbers with every frame.
+The pulsing inlet depends on the step count, so record step numbers with every frame. The training step uses them to get uInst. The high-res run must use pulse frequency f_lo/r (§2.2).
 
 ### 2.4 Inputs (9 channels, 256×128 each)
 
@@ -108,7 +150,9 @@ The pulsing inlet depends on the step count, so record step numbers with every f
 | 8 | Reynolds number | Re / Re_ref | constant over the grid |
 
 - All channels except 7 and 8 are 0 inside solids.
-- D = body size in low-res cells. **[DECIDE]** Re_ref (e.g. 200).
+- **Solid neighbours in derivatives:** use ρ = 1, u = 0. `macro_main` now writes mac = (1, 0, 0, 0) at every solid node each step (fixed 2026-11-03), so reading mac there is safe. Training uses the same rule.
+- u0 = the nominal `params.u0`, not the pulsed uInst.
+- D = body size in low-res cells: `sim.L` after the §2.2 scaling fixes. Use the chord for airfoils and the diameter for cylinders. **[DECIDE]** Re_ref (e.g. 200). *Code suggests:* reachable Re at Low is ≈ 10–1,000. Re_ref = 200 keeps the channel ≲ 5; Re_ref = 500 keeps it ≲ 2.
 - Padding at domain edges: replicate the edge value.
 
 ### 2.5 Architecture
@@ -116,13 +160,21 @@ The pulsing inlet depends on the step count, so record step numbers with every f
 - **Standard:** 9 → 16 → 16 → 16 → 3, all 3×3 convolutions, ReLU after the hidden layers, **no** ReLU on the output. 6,387 parameters.
 - **Sizes offered:** teaching (8 channels, ≈2.0k params), standard (16, ≈6.4k), large (4 hidden layers × 32, ≈31k). The size is fixed when a model is created.
 - **Initialisation:** He for hidden layers (σ = sqrt(2 / (C_in·9))), biases 0; **output layer all zeros** (an untrained model = the plain solver).
-- **Field of view:** 9×9 cells (11×11 counting the input derivatives).
+- **Field of view:** 9×9 cells (11×11 counting the input derivatives) for teaching/standard; the large model (5 conv layers) has 11×11 (13×13).
 - **Option:** leaky ReLU (slope 0.01) if dead channels become a problem.
 
 ### 2.6 Output and physics layer
 
-- Raw output $o$ (3 channels) → $\Pi_{\alpha\beta} = s\,\rho\,u_0^2\,o_{\alpha\beta}$. **[DECIDE]** s (default 0.05).
-- $\Delta f$ per direction (fluid cells only, χ = 1; also χ = 0 in the sponge zone):
+- Raw output $o$ (3 channels) → $\Pi_{\alpha\beta} = s\,\rho\,u_0^2\,o_{\alpha\beta}$. **[DECIDE]** s (default 0.05). *Code suggests:*
+  - Rough magnitudes: near-wall viscous stress 2ρνS is ≈ 3e-3, and plausible subgrid corrections are ≈ 1e-5–1e-4.
+  - With s = 0.05 (ρu0² ≈ 0.03), o would sit around 0.01–0.1.
+  - Calibrate s in Phase 1 from the 99th percentile of |Π_smag|/(ρu0²) at Low; this will likely give s ≈ 0.005.
+- **Runtime safety clamp:** clip |Π| so that |Δf_i| stays well below f_i (diagonal f ≈ 1/36). There is no output activation.
+- $\Delta f$ per direction. χ = 1 on fluid cells. χ = 0 on:
+  - solids;
+  - the sponge zone;
+  - the **boundary ring**: x = 0 and y = 0 / NY−1 are overwritten with feq; edge nodes are not streamed; x = NX−1 is the outlet copy;
+  - **re-equilibrated nodes** (`mac.w = 1`, `solver.wgsl:287-289`).
 
 | i | c_i | Δf_i |
 |---|---|---|
@@ -132,7 +184,7 @@ The pulsing inlet depends on the step count, so record step numbers with every f
 | 5, 7 | (1,1), (−1,−1) | (1/12)(Πxx + Πyy) + (1/4)Πxy |
 | 6, 8 | (−1,1), (1,−1) | (1/12)(Πxx + Πyy) − (1/4)Πxy |
 
-**[VERIFY]** the direction numbering against `solver.wgsl` (CXA/CYA tables) and remap the table to match.
+**Verified:** the direction numbering matches `solver.wgsl:116-118` (CXA/CYA) and `lbm.js` exactly, so no remap is needed. The coefficients equal $w_i/(2c_s^4)\,Q_i:\Pi$, and $\sum_i \mathbf{c}_i\mathbf{c}_i\Delta f_i = \Pi$.
 
 - Applied **after collide, before stream**.
 - **Runtime strength α** (Physics tab slider, 0–100%, default 100%): Π_used = α·Π. Training always uses α = 1.
@@ -141,7 +193,12 @@ The pulsing inlet depends on the step count, so record step numbers with every f
 
 $$\mathcal{L} = \frac{1}{N_{fluid}}\sum M(x,y)\,\frac{|\mathbf{u}_B - \mathbf{u}_C|^2}{u_0^2}$$
 
-**Loss mask M = 0** for: solid cells; cells whose r×r high-res block was partly solid; inlet columns; outlet columns; the sponge zone.
+**Loss mask M = 0** for:
+- solid cells;
+- cells whose r×r high-res block was partly solid;
+- inlet columns, outlet columns and the sponge zone;
+- the top and bottom rows (y = 0 and NY−1, overwritten with feq);
+- cells where the U_CAP velocity clamp or bad-node re-equilibration fired in A or B. These are non-differentiable; log them as auto-check failures.
 
 Optional later terms (off by default):
 - density: λ_ρ ≈ 0.1, scaled by $(3u_0^2)^2$;
@@ -176,9 +233,20 @@ macro_main → ml_inputs → conv L1 → conv L2 → conv L3 → conv out (Π)
           → collide_main → ml_apply (Δf into fB) → stream_main → outlet_main
 ```
 
-- **Separate pipelines and bind groups for the ML passes**, each with ≤ 4–5 storage buffers. Do not add bindings to the solver's bind group (see parity audit A1).
+- **Hook point:**
+  - The per-step loop in `GpuSim.encodeFrame` (`gpuSim.js:354-364`). All sub-steps (up to `MAX_STEPS_PER_FRAME` = 32) run inside **one compute pass**.
+  - ML dispatches go into that loop. Dispatches per step rise from 4 to 10.
+  - ML passes don't read the per-step `StepParams`, so they need no per-step bind groups.
+- **Separate WGSL module, pipelines and bind groups for the ML passes.**
+  - Compile them in `gpuContext.js`, following the `SOLVER_BINDINGS` pattern with `layout: "auto"`.
+  - Do not add bindings to the solver's bind group: no solver pass may exceed 7 storage buffers, and the baseline limit is 8.
+  - Storage buffers per pass: `ml_inputs` ≈ 4 (mac, nodeType, wallDist, inputs); conv 3–4 (in, weights, out, nodeType); `ml_apply` 4 (mac, nodeType, Π, fB).
+  - Use a separate ML uniform buffer, written once per frame.
 - **Buffers (Low, float32):** inputs 9 maps (1.2 MB), h1/h2/h3 16 maps each (2.1 MB each), Π 3 maps (0.4 MB), weights (~25 KB), uniforms (strength, s, u0, Re_ref, D).
-- **Expected cost:** standard model ≈ 6,300 multiply-adds per cell per step, roughly 3–10× a plain low-res step depending on shader quality. Optional: apply every N steps (the model must then be trained the same way).
+- **Expected cost:** standard model ≈ 6,300 multiply-adds per cell per step. That could be ≥ 10× a plain low-res step with a naive shader.
+  - The budget: high-res costs r³ × Low per physical time, i.e. 64× at r = 4 but only **8× at r = 2**. The "≥ 5× faster" target may therefore fail for `256←512`.
+  - Low (32k cells) is dispatch-bound, so per-step ratios mislead. Measure wall time per physical time.
+  - Optional: apply the model every N steps (it must then be trained the same way).
 - **Model buttons** (ML1–ML4) are greyed out unless the sim is at Low (the model's low resolution). Selecting one applies and locks its physics settings (2.3); clicking it again turns the model off. Empty slots are shown dashed and disabled.
 
 ---
@@ -194,15 +262,23 @@ For each r×r block:
 
 Also compute a per-block **fluid fraction**, used for the loss mask.
 
+- **Average over fluid high-res nodes only.** Solid fA holds uncollided "conveyor" values, and solid mac is the rest state (1, 0, 0), not the flow. Use fluid-only means for partially solid blocks (they are masked anyway), and the same rule everywhere.
+- Shrink from moments of fA at the end of the step. `mac` holds the *pre*-collision macros of the step and is velocity-capped.
+- Disable capture when sandbox-painted nodes exist: NODE_PAINTED is not stored in `geometry.bin`.
+
 ### 4.2 Step-aligned capture
 
 - The capture hooks into the **solver step counter**, not the render loop (sub-steps per frame are not multiples of r).
 - Save a frame when `(step − startStep) % r == 0`.
+- `copyBufferToBuffer` cannot run inside a compute pass, and all sub-steps share one pass. So dispatch a `shrink` kernel **inside the step loop**, writing into a capture ring buffer (one 393 KB slot per frame; ≥ 9 slots per burst). Copy the ring to a map buffer after the pass ends. The alternative is splitting the pass at capture steps.
 - Read back asynchronously (`mapAsync`) and write to OPFS immediately. Never accumulate frames in RAM. If the write queue grows, pause capture briefly rather than block the solver.
 
 ### 4.3 Automatic capture (Capture button)
 
-1. **Wait for convergence:** running mean of Cd and Cl amplitude change < ~1% over the last few periods (reuse the history in `convergenceMonitor.js`).
+1. **Wait for convergence:** running mean of Cd and Cl amplitude change < ~1% over the last few periods.
+   - Reuse `convergenceMonitor.js`, but its history is too short at high res: 600 samples, one per frame, with a 240-sample stats window.
+   - A High shedding period is r× longer in steps, so 600 samples covers only ≈ 1.6 periods at 10 steps/frame. Add a longer or decimated history.
+   - St is computed only for cylinder and square (`convergenceMonitor.js:86-87`); airfoils need new code.
 2. **Detect the flow type** from the lift signal: shedding (Cl oscillates; period from zero crossings) or steady.
 3. **Capture:**
    - shedding: 2 cycles × 16 bursts per cycle, spaced evenly in **phase**, 9 frames per burst (8 pairs) → 256 pairs;
@@ -216,7 +292,7 @@ Also store the case's **high-res reference time series** (Cd, Cl, St; small) for
 
 ### 4.4 Sweep
 
-- **Runs on the CFD page** (Dataset tab → Sweep). **[DECIDE]** where its parameters are set: the final training-page bar has no sweep panel, so the simplest option is a **popup panel below the CFD bar** (like Monitor) opened by the Sweep button. A "fill gaps" action on the training page's dataset window could pre-fill it.
+- **Runs on the CFD page** (Dataset tab → Sweep). **[DECIDE]** where its parameters are set. The final training-page bar has no sweep panel, so the simplest option is a **popup panel below the CFD bar** (like Monitor) opened by the Sweep button. A "fill gaps" action on the training page's dataset window could pre-fill it. *Code suggests:* the popup. There is no panel infrastructure besides the per-sim monitor canvas, so it is new UI either way.
 - Parameter lists (Re, body, angle of attack, …); full grid or random spread; estimated time and storage shown before starting.
 - Per case: set parameters at high res → converge → automatic capture → checks → save to pending.
 - Start each case from the previous converged flow where only Re changed.
@@ -250,7 +326,7 @@ Also store the case's **high-res reference time series** (Cd, Cl, St; small) for
 - **`geometry.bin`:** low-res solid mask, SDF, BFL link fractions (q), fluid-fraction / loss mask.
 - **`frames.bin`:** N × [ρ−1, u_x, u_y] at 256×128.
 
-**[DECIDE] precision: float32 recommended.** Velocity errors between low and high res are ~1e-4–1e-3, and float16 spacing near u ≈ 0.1 is ~6e-5, which adds noticeable noise to the training targets. Storing ρ−1 (not ρ) is required in any 16-bit format. Option: ρ−1 in float16 and velocities in float32.
+**[DECIDE] precision: float32 recommended.** *Code suggests:* float32. `mac` is already f32, and the sizes below are confirmed (3 × 32,768 × 4 = 393,216 B per frame). Velocity errors between low and high res are ~1e-4–1e-3, and float16 spacing near u ≈ 0.1 is ~6e-5, which adds noticeable noise to the training targets. Storing ρ−1 (not ρ) is required in any 16-bit format. Option: ρ−1 in float16 and velocities in float32.
 
 **Size (float32):** ~393 KB per frame; ~440 KB per pair with 9-frame bursts; ~113 MB per automatic shedding capture.
 
@@ -318,7 +394,7 @@ Also store the case's **high-res reference time series** (Cd, Cl, St; small) for
 |---|---|---|
 | 1 | loss → δu_B = 2M(u_B − u_C)/(N u0²) | 2×256×128 |
 | 2 | δf_new_i = δu·(c_i − u_B)/ρ_B | 9×256×128 |
-| 3 | reverse stream: δf**_i(x) = δf_new_i(x + c_i); reverse BCs (bounce-back: same route; BFL: transpose of its linear mix; inlet: stop; outlet copy: add to source) | 9×256×128 |
+| 3 | reverse stream: δf**_i(x) = δf_new_i(x + c_i) for interior nodes; edge nodes are not streamed, so identity. Reverse BCs: painted bounce-back = swap; BFL = transpose of its linear mix (below); inlet x = 0 and top/bottom rows: stop; sponge: × (1 − s); outlet copy: add to source | 9×256×128 |
 | 4 | δΔf = δf** (identity; the f* branch is dropped for K = 1) | — |
 | 5 | δΠ = transposed Δf table (·χ) | 3×256×128 |
 | 6 | δo = s ρ u0² δΠ | 3×256×128 |
@@ -328,15 +404,34 @@ Also store the case's **high-res reference time series** (Cd, Cl, St; small) for
 | 10–11 | gate, then layer 2 | 16×16×3×3+16 |
 | 12–13 | gate, then layer 1 (grads Σ δz1·in; stop; optional saliency δin) | 16×9×3×3+16 |
 
+- The table shows the standard model (3 hidden layers). For L hidden layers, stages 7–13 repeat per layer: gate, then layer.
 - Stages 2–6 run in one kernel (gather from neighbours, no intermediate arrays).
+- **BFL as implemented** (`stream_main`, `solver.wgsl`; fixed 2026-11-03, see below).
+  - Setup: a link i at fluid node x exists when x + c_i is solid (`geometry.js:255-273`); q is clamped to [0.01, 1]. Write o = opp(i) and f* = post-collision fB.
+  - q < ½: r[o] = 2q·f*_i(x) + (1−2q)·f*_i(x−c_i)
+  - q ≥ ½: r[o] = f*_i(x)/(2q) + (1−1/(2q))·f*_o(x)
+  - If x − c_i is outside the domain or solid, it falls back to r[o] = f*_i(x). r[i] (streamed in from the fluid side) is untouched.
+  - Transpose: the gradient on r[o] goes to fB[i] at x and x − c_i (q < ½), or to fB[i] and fB[o] at x (q ≥ ½), with the same weights. The pull-stream contribution for r[o] (from the solid node) is dropped.
+- **BFL orientation fixed (2026-11-03).** The previous code overwrote r[i] (the known population from the fluid side) with values read from the solid node, so solid nodes acted as uncollided conveyors. It now rebuilds r[o] as above. Check: 1-D force-driven channel (CPU port of the shader step): error vs Poiseuille is 0.2–0.6% of u_max for q = 0.05–0.8 after the fix, versus 9–24% before, when the first fluid node was pinned to u ≈ 0 whatever q was.
 - **Start with BFL reversed as plain bounce-back**, then refine.
-- **Weight gradients:** one workgroup per weight, tree reduction over cells (no float atomics in WGSL; avoid integer-atomic overflow, cf. audit A8).
+- **Weight gradients:** one workgroup per weight, tree reduction over cells. WGSL has no float atomics, and fixed-point integer atomics risk overflow.
 - **Batch:** zero the gradient buffers, accumulate over B pairs, average, NaN check, clip, then one Adam step.
 
 ### 7.3 Batches and data handling
 
 - **Diverse batches:** random pairs across cases, Re values, phases and bodies. Balance sampling so each case is drawn about equally. Batches must contain **several Re values** for the Re input to be learnable.
-- **Mirror augmentation (y-flip):** u_y → −u_y, ω → −ω, S_xy → −S_xy, Π_xy → −Π_xy, and the **geometry buffers must be mirrored too** (mask, SDF, BFL q). Only valid if the flipped domain and BCs are physically equivalent. **[VERIFY]** for each body/BC.
+- **Mirror augmentation (y-flip):** u_y → −u_y, ω → −ω, S_xy → −S_xy, Π_xy → −Π_xy, and the **geometry buffers must be mirrored too** (mask, SDF, BFL q). Only valid if the flipped domain and BCs are physically equivalent.
+
+  **Verified:**
+  - BCs: the inlet is uniform, top and bottom both use feq(1, uInst, 0) (`solver.wgsl:444-447`), and the sponge and outlet are y-independent. All are symmetric ✔. The nozzle split inlet and lid cavity are not symmetric, but both are being removed.
+  - Body centres sit at `floor(NY/2)` = 64, while the mirror axis is 63.5. A mirrored case is therefore shifted by 1 cell, which is valid because the geometry is mirrored with it.
+  - NACA0012 at α becomes −α ✔. NACA2412 becomes a negative-camber airfoil: valid physics, but outside the "2412" label.
+  - Blocks are close to symmetric.
+
+  **Also required:**
+  - Permute direction indices **2↔4, 5↔8, 6↔7** in `linkQ` (and in any f array), not just flip rows.
+  - Exclude or mirror painted nodes.
+  - Flip the sign of Cl if the force loss is used.
 - **Prefetch** the next batch from OPFS while the GPU trains.
 - Training never loads the whole dataset to the GPU.
 
@@ -363,7 +458,7 @@ Both pages share one shell: a header line, then a single control bar of grouped 
 | Group | Controls | Notes |
 |---|---|---|
 | **Session** | Sandbox · **Training** (new) · Monitor · Compare | Training switches to the training view (same page, same OPFS) |
-| **Body** | NACA 0012 · NACA 2412 · Blocks · Cylinder · Empty; body parameter slider (e.g. Cylinder diameter) | Nozzle, Lid Cavity and Square removed (lid-cavity code paths can go) |
+| **Body** | NACA 0012 · NACA 2412 · Blocks · Cylinder · Square · Empty; body parameter slider (Cylinder D/H) | Nozzle and Lid Cavity removed, with their solver paths (done 2026-11-03) |
 | **Flow** | Pulse Off / Pulse On · Smoke Tracer Particles · Inlet velocity slider · **Reynolds number slider** (moved here from Physics) | Re slider clamped by stability (2.3) |
 | **Physics** | 2×3 grid: TRT \| BGK · Smag \| WALE · Wall On \| Wall Off; **Model strength** slider (new) | Buttons lock to the model's settings while a model is active; strength slider disabled ("off") with no model |
 | **Dataset** (new) | Capture · Sweep · Approve · Discard; counter **pending / total** pairs | Capture/Sweep only at Mid/High/Ultra, not in compare mode. Approve/Discard act on the whole pending set |
@@ -377,7 +472,7 @@ Both pages share one shell: a header line, then a single control bar of grouped 
 **Other CFD-page rules:**
 - Pending data survives reloads; on load, prompt "Unapproved capture found (N pairs): Approve / Discard".
 - Optional: compare mode with ML vs no-ML side by side.
-- Switching to the training view must destroy or pause the CFD sim's GPU resources and listeners (cf. audit A11).
+- Switching to the training view must destroy or pause the CFD sim's GPU resources and listeners. `GpuSim.destroy()` exists; canvas listeners and the rAF loop must also stop.
 
 ### 8.2 Training page bar (9 groups)
 
@@ -435,6 +530,10 @@ Shared toolbar above both views:
 - Blame toggle shows the blame maps instead of activations.
 - At smaller window heights the grid scrolls or tiles shrink.
 
+**Model sizes:** columns and grids follow the model's architecture.
+- The teaching model shows 8 circles and a 2×4 grid per layer.
+- The large model shows 4 hidden layers × 32 channels, in a 4×8 grid with scrolling. The feature-map views name its layers 1–4 rather than mapping to the three fixed names.
+
 **Readbacks for visuals:** non-blocking (`mapAsync`), at most ~1–2 per second in Watch mode; full detail in Step mode; minimal in Fast mode.
 
 ---
@@ -443,9 +542,10 @@ Shared toolbar above both views:
 
 | Test | Pass condition |
 |---|---|
-| Conservation (random Π, thousands of steps) | total mass and momentum unchanged to float rounding; per cell Σ Δf = 0, Σ c Δf = 0, Σ cc Δf = Π |
+| Conservation (random Π) | per cell: Σ Δf = 0, Σ c Δf = 0, Σ cc Δf = Π to float rounding. Interior-fluid sums of ρ and ρu over fB are unchanged by `ml_apply`. The domain is open (inlet, feq rows, outlet, sponge) and has no periodic BC, so global totals are not conserved even without ML |
 | Uniform Π | interior velocity unchanged |
-| Smagorinsky equivalence | Π = −2ρν_t S matches a run with τ + 3ν_t |
+| Smagorinsky equivalence | BGK: Π = (1/τ − 1/τ′)·Π_neq (pre-collision) after collide at τ matches collide at τ′ = τ + 3ν_t to float rounding. With −2ρν_t S, state a tolerance instead |
+| BFL / no-slip | force-driven channel with walls at fractional positions matches the Poiseuille profile (≤ 1% of u_max) for q across (0, 1); no flow "through" a thick body (§7.2) |
 | Strength 0 / zero-init model | bit-identical to the plain solver |
 | Shrink | shrunk totals of ρ and ρu equal the high-res totals |
 | Capture alignment | frame step numbers exactly r apart |
@@ -469,9 +569,10 @@ Shared toolbar above both views:
 
 | Phase | Build | Done when |
 |---|---|---|
-| 0 | Measure the gap: cylinder Re 100/200 at Low vs High (Cd, Cl amp, St) | the gap is known (decides how much there is to gain) |
-| 1 | Physics layer: Π buffer, `ml_apply`, strength | conservation, uniform-Π, Smagorinsky and strength-0 tests pass |
-| 2 | CNN forward: `ml_inputs`, `conv`, weights, He init, step hook | random model runs every step; feature maps readable; cost measured |
+| 0a | ~~Preset remap + 256×128 Low + Ultra~~ (done); ~~scaling fixes~~ (done) (cylinder D, blocks, sponge ∝ NX, pulse f/r, geometry offset); Re clamp at sim creation (BFL orientation already fixed) | shrunk high-res mask overlays the low-res mask; cylinder Cd/St sane after the BFL fix |
+| 0 | Measure the gap: cylinder Re 100/200 at Low vs High (Cd, Cl amp, St), with a case list feasible at Low (D_lo ≥ 18 at u0 0.1732, or lower u0 and larger D) | the gap is known (decides how much there is to gain) |
+| 1 | Physics layer: Π buffer, `ml_apply`, strength; calibrate s | conservation, uniform-Π, Smagorinsky and strength-0 tests pass |
+| 2 | CNN forward: `ml_inputs`, `conv`, weights, He init, step hook; debug init with non-zero output layer; feature-map map buffers (separate from the diagnostics ring) | random model runs every step; feature maps readable; cost measured as wall time per physical time (`onSubmittedWorkDone`, or request `timestamp-query`) |
 | 3 | Capture: shrink, step hook, OPFS, pending/approve/discard, automatic capture | shrink/alignment/persistence tests pass |
 | 4 | Training engine (no UI) | all gradient checks pass; one case trains to R < 1; rollout moves Cd/St toward high-res |
 | 5 | Training page UI | train and watch from the UI |
@@ -496,7 +597,12 @@ docs/ML_PLAN.md
 ```
 
 **Touch points in existing code:**
-- `src/gpu/gpuSim.js`: ML dispatches in the step loop; capture hook on the step counter.
+- `src/gpu/gpuSim.js`: ML dispatches and the in-pass shrink in the step loop (`encodeFrame`); capture hook on the step counter; `SPONGE_WIDTH` ∝ NX.
+- `src/gpu/gpuContext.js`: compile the ML WGSL modules and create their pipelines (it compiles only solver.wgsl and render.wgsl today); check `device.limits` for Ultra.
+- `src/simInstance.js`: pulse frequency scaling per fidelity.
+- `src/geometry.js`: blocks scale with r; geometry offset (r−1)/2 at high res.
+- `src/boundary.js`: `SPONGE_WIDTH` ∝ NX (it must match `gpuSim.js`).
+- **Trainer reuse:** instantiate a `GpuSim` at 256×128 per training case and `uploadField` the reconstructed f. Training then runs the solver WGSL and bind groups unchanged.
 - `src/main.js`, `index.html`: new Dataset and Model groups, strength slider, Re slider moved to Flow, Training button, view switching, removed bodies, and the `GRID_PRESETS` remap plus Ultra. Move tab/UI logic into modules rather than growing `main.js`.
 - `src/convergenceMonitor.js`: reuse its Cd/Cl history for convergence and period detection.
 - **Reuse** the solver's macro/collide/stream WGSL in training, so training and runtime are guaranteed identical.
@@ -515,19 +621,22 @@ docs/ML_PLAN.md
 
 ## 13. Open decisions and checks
 
-- [ ] **[DECIDE]** LES/collision setup for capture, training and runtime (2.3)
-- [ ] **[DECIDE]** Re_ref, stress scale s (2.4, 2.6)
-- [ ] **[DECIDE]** frame precision: float32, or ρ−1 f16 + u f32 (5.2)
-- [ ] **[DECIDE]** default fidelity after the preset remap (2.1)
-- [ ] **[DECIDE]** where sweep parameters are set: popup below the CFD bar recommended (4.4)
+- [ ] **[DECIDE]** LES/collision setup for capture, training and runtime (2.3). *Code suggests:* A with TRT; the wall model is a no-op with LES off.
+- [ ] **[DECIDE]** Re_ref, stress scale s (2.4, 2.6). *Code suggests:* Re_ref 200–500; calibrate s in Phase 1 (likely ≈ 0.005).
+- [ ] **[DECIDE]** frame precision: float32, or ρ−1 f16 + u f32 (5.2). *Code suggests:* float32.
+- [x] **[DECIDE]** default fidelity after the preset remap: High (1024×512) (2.1)
+- [ ] **[DECIDE]** where sweep parameters are set: popup below the CFD bar recommended (4.4). *Code suggests:* the popup.
 - [x] Training steps: 7 numbered steps in the training bar (8.2)
-- [x] Add a 2048×1024 fidelity: yes, as Ultra (2.1)
-- [ ] **[VERIFY]** fidelity preset remap: everything keyed on the old Low/Mid/High names (2.1)
-- [ ] **[VERIFY]** fidelity presets: u0, τ and body size per fidelity; geometry alignment across fidelities (2.2)
-- [ ] **[VERIFY]** Ultra fits the adapter's buffer limits; hide it otherwise (2.1)
-- [ ] **[VERIFY]** D2Q9 direction numbering vs the Δf table (2.6)
-- [ ] **[VERIFY]** which bodies/BCs allow mirror augmentation (7.3)
-- [ ] **[VERIFY]** BFL formula in `stream_main`, for the backward pass (7.2)
+- [x] Ultra = today's High (2048×1024) renamed; the only new grid is 256×128 (2.1)
+- [x] **[VERIFY]** preset remap sites: `main.js` lines 54, 63, 132, 372-380, 1377, 1400, 1758-1776, 1844; `index.html:246-249`. There are no fidelity tooltips yet (2.1)
+- [x] **[VERIFY]** u0 and τ scale correctly. Cylinder D, blocks, sponge width and pulse frequency do **not** scale, and there is a (r−1)/(2r)-cell block offset. Fixes are in Phase 0a (2.2)
+- [x] **[VERIFY]** Ultra fits the default device limits (75.5 MB < 128 MiB); VRAM is the real risk (2.1)
+- [x] **[VERIFY]** D2Q9 numbering matches `solver.wgsl:116-118`; no remap needed (2.6)
+- [x] **[VERIFY]** mirroring: BCs are symmetric; direction permutation 2↔4, 5↔8, 6↔7 is required; NACA2412 becomes negative camber (7.3)
+- [x] **[VERIFY]** BFL formula recorded, with its transpose (7.2)
+- [x] **[CHECK]** BFL orientation: was inverted; fixed in `stream_main` and verified against Poiseuille (7.2, 9). Still to do: an in-browser cylinder check (Cd, St) before Phase 0 numbers are taken
+- [x] **[FIX]** Force estimator: `force_main` now uses standard momentum exchange, c_i(f*_i + f_o) per link, consistent with the fixed BFL. The normal filter and the stale pre-collision population are gone. Channel check: wall force = input momentum to 1e-4 at all q tested; the old estimator gave 3–5.5× in pure shear (§4.3, §7.4 Cd/Cl/St)
+- [x] **[FIX]** Solid nodes now carry rest macros: `macro_main` writes mac = (1, 0, 0, 0) at solids, so mac is never stale after a geometry rebuild (§2.4)
 
 ---
 

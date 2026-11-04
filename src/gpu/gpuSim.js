@@ -9,6 +9,7 @@
 // ============================================================
 
 import { Q, W } from "../lbm.js";
+import { spongeLayout } from "../caseSpec.js";
 import {
   SOLVER_BINDINGS,
   MAX_STEPS_PER_FRAME,
@@ -21,8 +22,6 @@ export const NODE_PAINTED = 2;
 export const NODE_WALLADJ = 4;
 
 const PARAMS_BYTES = 112;
-const SPONGE_WIDTH = 28;
-const SPONGE_STRENGTH = 0.6;
 const READBACK_RING = 3;
 
 const STORAGE = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -258,7 +257,7 @@ export class GpuSim {
   writeParams(extra = {}) {
     const s = this.sim;
     const NX = this.NX;
-    const width = Math.min(SPONGE_WIDTH, Math.max(1, NX - 2));
+    const sponge = spongeLayout(NX);
 
     const buf = new ArrayBuffer(PARAMS_BYTES);
     const u = new Uint32Array(buf);
@@ -268,21 +267,19 @@ export class GpuSim {
     u[0] = NX;
     u[1] = this.NY;
     u[2] = this.N;
-    u[3] = s.params.bodyType === "lid-driven-cavity" ? 1 : 0;
+    u[3] = 0;   // reserved (was lid-driven cavity)
 
     u[4] = s.physics.collisionModel === "bgk" ? 1 : 0;
     u[5] = s.physics.lesModel === "smagorinsky" ? 1 : s.physics.lesModel === "wale" ? 2 : 0;
     u[6] = s.physics.wallModel ? 1 : 0;
-    u[7] = s.nozzle.active ? 1 : 0;
+    u[7] = 0;   // reserved (was nozzle)
 
     f[8] = s.NU0;
-    f[9] = s.nozzle.uCoflow;
-    f[10] = s.nozzle.cy;
-    f[11] = s.nozzle.halfD;
+    // f[9..11] reserved (were nozzle co-flow / centre / half-width)
 
-    i32[12] = NX - 1 - width;
-    f[13] = width;
-    f[14] = SPONGE_STRENGTH;
+    i32[12] = sponge.start;
+    f[13] = sponge.width;
+    f[14] = sponge.strength;
     f[15] = s.RHO0 ?? 1.0;
 
     f[16] = s.forceRef.x;
@@ -333,7 +330,6 @@ export class GpuSim {
   } = {}) {
     const { compute } = this.gpu;
     const steps = Math.min(inletVelocities.length, MAX_STEPS_PER_FRAME);
-    const isCavity = this.sim.params.bodyType === "lid-driven-cavity";
 
     this.frameSeed = (this.frameSeed + 1) >>> 0;
     this.writeParams({ particleDt });
@@ -356,11 +352,9 @@ export class GpuSim {
       this.#dispatch2D(pass, compute.macro_main, bg.macro_main);
       this.#dispatch2D(pass, compute.collide_main, bg.collide_main);
       this.#dispatch2D(pass, compute.stream_main, bg.stream_main);
-      if (!isCavity) {
-        pass.setPipeline(compute.outlet_main);
-        pass.setBindGroup(0, this.bind.outlet_main);
-        pass.dispatchWorkgroups(Math.ceil(this.NY / 64));
-      }
+      pass.setPipeline(compute.outlet_main);
+      pass.setBindGroup(0, this.bind.outlet_main);
+      pass.dispatchWorkgroups(Math.ceil(this.NY / 64));
     }
 
     if (advectParticles && this.particleCount > 0) {

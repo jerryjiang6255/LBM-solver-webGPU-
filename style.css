@@ -254,11 +254,17 @@ body {
 
 #grid-low,
 #grid-mid,
-#grid-high {
+#grid-high,
+#grid-ultra {
   min-width: 54px;
   text-align: center;
   font-family: var(--mono);
   letter-spacing: 0.08em;
+}
+
+#grid-ultra:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 /* ==========================================================

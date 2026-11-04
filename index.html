@@ -71,12 +71,10 @@
           <div class="btn-grid">
             <button class="btn control-btn" id="body-airfoil">NACA 0012</button>
             <button class="btn control-btn" id="body-naca2412">NACA 2412</button>
-            <button class="btn control-btn" id="body-nozzle">Nozzle</button>
             <button class="btn control-btn" id="body-blocks">Blocks</button>
           </div>
           <div class="btn-grid">
             <button class="btn control-btn" id="body-cylinder">Cylinder</button>
-            <button class="btn control-btn" id="body-lid-driven-cavity">Lid Cavity</button>
             <button class="btn control-btn" id="body-square-cylinder">Square</button>
             <button class="btn control-btn" id="body-empty">Empty</button>
           </div>
@@ -89,37 +87,13 @@
             <input type="range" id="aoa-slider" class="control-slider" min="-45" max="45" step="0.5" value="10">
           </div>
 
-          <div class="slider-row" id="nozzle-row" style="display:none">
-            <label>
-              <span>Nozzle diameter</span>
-              <output id="nozzle-value">16</output>
-            </label>
-            <input type="range" id="nozzle-slider" class="control-slider" min="8" max="80" step="2" value="16">
-          </div>
-
           <div class="slider-row" id="cylinder-row" style="display:none">
             <label>
-              <span>Cylinder diameter</span>
-              <output id="cylinder-value">32</output>
+              <span class="tooltip-trigger" data-tip="Cylinder diameter as a fraction of the domain height (D/H). The same D/H gives the same geometry at every fidelity; the cell count shown is for the current grid.">Cylinder D/H</span>
+              <output id="cylinder-value">0.125</output>
             </label>
-            <input type="range" id="cylinder-slider" class="control-slider" min="8" max="96" step="2" value="32">
+            <input type="range" id="cylinder-slider" class="control-slider" min="0.04" max="0.40" step="0.005" value="0.125">
           </div>
-
-          <div class="slider-row" id="cavity-aspect-row" style="display:none">
-            <label>
-              <span>Cavity aspect</span>
-              <output id="cavity-aspect-value">1.00</output>
-            </label>
-            <input
-              type="range"
-              id="cavity-aspect-slider"
-              class="control-slider"
-              min="0.50"
-              max="2.00"
-              step="0.05"
-              value="1.00"
-            >
-          </div>    
         </div>
 
         <!-- Flow -->
@@ -152,10 +126,10 @@
 
           <div class="slider-row" id="pulse-freq-row" style="display:none">
             <label>
-              <span>Pulse frequency</span>
-              <output id="pulse-freq-value">0.010</output>
+              <span class="tooltip-trigger" data-tip="Pulse frequency as a Strouhal number St = f·L/U (L = body length, U = inlet velocity), so the forcing is the same at every fidelity.">Pulse St (f·L/U)</span>
+              <output id="pulse-freq-value">0.20</output>
             </label>
-            <input type="range" id="pulse-freq-slider" class="control-slider" min="0.001" max="0.050" step="0.001" value="0.010" />
+            <input type="range" id="pulse-freq-slider" class="control-slider" min="0.02" max="2.00" step="0.01" value="0.20" />
           </div>
         </div>
 
@@ -244,9 +218,10 @@
           <div style="display:flex; align-items:center; gap:12px;">
 
             <div class="btn-stack">
-              <button class="btn" id="grid-high">High</button>
-              <button class="btn active" id="grid-mid">Mid</button>
-              <button class="btn" id="grid-low">Low</button>
+              <button class="btn tooltip-trigger" id="grid-ultra" data-tip="Ultra: 2048 x 1024 (2.1M nodes). Capture fidelity for 256&#8592;2048 models (r = 8). Hidden if the GPU's buffer limits can't hold it; disabled in compare mode.">Ultra</button>
+              <button class="btn active tooltip-trigger" id="grid-high" data-tip="High: 1024 x 512 (524k nodes). Default; capture fidelity for 256&#8592;1024 models (r = 4).">High</button>
+              <button class="btn tooltip-trigger" id="grid-mid" data-tip="Mid: 512 x 256 (131k nodes). Capture fidelity for 256&#8592;512 models (r = 2).">Mid</button>
+              <button class="btn tooltip-trigger" id="grid-low" data-tip="Low: 256 x 128 (33k nodes). The resolution ML models run at.">Low</button>
             </div>
 
             <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px;">
@@ -347,8 +322,8 @@
         placed in real time and the flow adapts instantly without any restart or remesh. The solver
         here uses a D2Q9 lattice with selectable collision / LES physics, pulsing inlet forcing,
         BFL interpolated boundary conditions, monitor plotting, and SDF-based geometry. This
-        WebGPU version runs the same solver on the GPU, which allows finer grids at every
-        fidelity level. Any feedback or advice is greatly appreciated.
+        WebGPU version runs the same solver on the GPU, with four fidelity levels from
+        256 x 128 up to 2048 x 1024. Any feedback or advice is greatly appreciated.
       </p>
     </footer>
   </div>

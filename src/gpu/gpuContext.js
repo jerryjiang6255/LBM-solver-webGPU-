@@ -18,7 +18,7 @@ export const SOLVER_BINDINGS = {
   stream_main:   [0, 1, 2, 3, 4, 5, 7],
   outlet_main:   [0, 2],
   rest_solids:   [0, 2, 5],
-  force_main:    [0, 3, 7, 8, 9, 10],
+  force_main:    [0, 2, 3, 7, 9, 10],
   reduce_main:   [0, 4, 5, 10, 11],
   particle_main: [0, 4, 5, 12],
   gather_vec:    [0, 4, 5, 13],

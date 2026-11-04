@@ -22,6 +22,7 @@
 // ============================================================
 
 import { Q, RHO0, U0, CX, CY, W } from "./lbm.js";
+import { pulseFreqPerStep } from "./caseSpec.js";
 
 // ---------------------------------------------------------
 // feqAt(i, r, u, v)
@@ -61,8 +62,7 @@ export function setReynolds(sim, re) {
 // buildInitialField(sim, u0, solid)
 // ---------------------------------------------------------
 // Same initial state as the CPU initField(): rest density, uniform
-// inlet velocity in the fluid (zero for the lid-driven cavity and in
-// solids), equilibrium populations. Returns CPU-side arrays that the
+// inlet velocity in the fluid (zero in solids), equilibrium populations. Returns CPU-side arrays that the
 // caller uploads to the GPU and then discards.
 export function buildInitialField(sim, u0 = sim.params.u0, solid = sim.solid) {
   const N = sim.N;
@@ -75,9 +75,6 @@ export function buildInitialField(sim, u0 = sim.params.u0, solid = sim.solid) {
     rho[n] = RHO0;
 
     if (solid && solid[n]) {
-      ux[n] = 0.0;
-      uy[n] = 0.0;
-    } else if (sim.params?.bodyType === "lid-driven-cavity") {
       ux[n] = 0.0;
       uy[n] = 0.0;
     } else {
@@ -115,8 +112,9 @@ export function buildInitialField(sim, u0 = sim.params.u0, solid = sim.solid) {
 // ---------------------------------------------------------
 // Returns the instantaneous inlet velocity.
 // Pulsation uses multiplicative sinusoidal forcing:
-//   u(t) = u0 * (1 + amp * sin(2π f step))
-// and is clamped to remain non-negative.
+//   u(t) = u0 * (1 + amp * sin(2π f step)),  f = St * u0 / L
+// so the forcing Strouhal number St = f L / u0 is the same at every
+// fidelity. Clamped to remain non-negative.
 export function getInletVelocity(sim) {
   const base = sim.params.u0;
   const flow = sim.flow;
@@ -125,7 +123,7 @@ export function getInletVelocity(sim) {
 
   const step = sim.runtime?.stepCount || 0;
   const amp  = flow.pulsationAmp;
-  const freq = flow.pulsationFreq;
+  const freq = pulseFreqPerStep(flow.pulsationSt, base, sim.L);
 
   const u = base * (1 + amp * Math.sin(2 * Math.PI * freq * step));
   return Math.max(0.0, u);
@@ -145,9 +143,7 @@ export function createSimInstance(options = {}) {
     id = "sim",
    bodyType = "airfoil",
     aoaDeg = 10,
-    nozzleDiameter = 16,
-    cylinderDiameter = 32,
-    cavityAspect = 1.0,
+    cylinderDH = 0.125,      // cylinder diameter / domain height
     u0 = 0.1732,
     reynolds = 5000,
 
@@ -161,10 +157,6 @@ export function createSimInstance(options = {}) {
     stepsPerFrame = 10,
     running = true,
 
-    // nozzle defaults
-    nozzleCy = Math.floor(NY / 2),
-    uCoflow = 0.005,
-
     // -----------------------------------------------------
     // Version 6 physics defaults
     // -----------------------------------------------------
@@ -177,7 +169,7 @@ export function createSimInstance(options = {}) {
     // -----------------------------------------------------
     pulsationOn = false,
     pulsationAmp = 0.10,
-    pulsationFreq = 0.01,
+    pulsationSt = 0.2,       // forcing Strouhal number f L / u0
   } = options;
 
   const N = NX * NY;
@@ -246,9 +238,7 @@ export function createSimInstance(options = {}) {
       reynolds,
       bodyType,
       aoaDeg,
-      nozzleDiameter,
-      cylinderDiameter,
-      cavityAspect,
+      cylinderDH,
     },
 
     // -----------------------------------------------------
@@ -267,7 +257,7 @@ export function createSimInstance(options = {}) {
     flow: {
       pulsationOn,
       pulsationAmp,
-      pulsationFreq,
+      pulsationSt,
     },
 
     // -----------------------------------------------------
@@ -290,16 +280,6 @@ export function createSimInstance(options = {}) {
       frameCount: 0,
       stepsPerFrame,
       stepCount: 0,
-    },
-
-    // -----------------------------------------------------
-    // Boundary/nozzle config
-    // -----------------------------------------------------
-    nozzle: {
-      active: false,
-      cy: nozzleCy,
-      halfD: nozzleDiameter / 2,
-      uCoflow,
     },
 
     // -----------------------------------------------------

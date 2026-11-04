@@ -8,10 +8,10 @@
 //   macro_main   moments, velocity cap, bad-node re-equilibration flag
 //   collide_main TRT / BGK + Smagorinsky / WALE + wall model   fA -> fB
 //   stream_main  pull streaming of interior nodes (solid nodes included,
-//                exactly like the CPU in-place sweep), BFL wall
-//                reconstruction from the post-stream snapshot, full-way
+//                exactly like the CPU in-place sweep), BFL (Bouzidi)
+//                wall reconstruction from the post-collision fB, full-way
 //                bounce-back on painted nodes, inlet / sponge / top-bottom
-//                or lid boundary conditions                       fB -> fA
+//                boundary conditions                              fB -> fA
 //   outlet_main  zero-gradient outlet copy (x = NX-1 <- x = NX-2)
 //
 // Populations are stored structure-of-arrays: f[i * N + n].
@@ -48,24 +48,21 @@ const TRT_LAMBDA : f32 = 3.0 / 16.0;
 const PAIR_A = array<u32, 4>(1u, 2u, 5u, 6u);
 const PAIR_B = array<u32, 4>(3u, 4u, 7u, 8u);
 
-// Force (forceSurface.js)
-const COS_THRESH : f32 = 0.1;
-
 struct Params {
   NX : u32,
   NY : u32,
   N : u32,
-  isCavity : u32,
+  _r0 : u32,              // reserved
 
   collisionModel : u32,   // 0 = TRT, 1 = BGK
   lesModel : u32,         // 0 = off, 1 = Smagorinsky, 2 = WALE
   wallModel : u32,
-  nozzleActive : u32,
+  _r1 : u32,              // reserved
 
   nu0 : f32,
-  uCoflow : f32,
-  nozzleCy : f32,
-  nozzleHalfD : f32,
+  _r2 : f32,              // reserved
+  _r3 : f32,              // reserved
+  _r4 : f32,              // reserved
 
   spongeStart : i32,
   spongeWidth : f32,
@@ -89,7 +86,7 @@ struct Params {
 };
 
 struct StepParams {
-  uInst : f32,   // instantaneous inlet / lid velocity for this step
+  uInst : f32,   // instantaneous inlet velocity for this step
   step : u32,
   _a : u32,
   _b : u32,
@@ -169,7 +166,13 @@ fn postStream(x : i32, y : i32, j : u32) -> f32 {
 fn macro_main(@builtin(global_invocation_id) g : vec3<u32>) {
   if (g.x >= P.NX || g.y >= P.NY) { return; }
   let n = g.y * P.NX + g.x;
-  if (isSolid(n)) { return; }
+  // Solid nodes carry rest macros (rho = 1, u = 0) so nothing that reads
+  // mac (particles, overlays, ML inputs, capture) ever sees stale values,
+  // e.g. after a geometry rebuild turns fluid nodes solid.
+  if (isSolid(n)) {
+    mac[n] = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    return;
+  }
 
   var r = 0.0;
   var jx = 0.0;
@@ -373,30 +376,34 @@ fn stream_main(@builtin(global_invocation_id) g : vec3<u32>) {
   var r : array<f32, 9>;
   for (var j = 0u; j < Q; j++) { r[j] = postStream(x, y, j); }
 
-  // BFL interpolated bounce-back on links into solid geometry.
+  // BFL (Bouzidi) interpolated bounce-back on links into solid geometry.
+  // Link i at this fluid node means x + c_i is solid and the wall sits a
+  // fraction q along c_i. The unknown after streaming is the population
+  // coming back out of the wall, o = opp(i); it is rebuilt from the
+  // post-collision populations in fB (r[i] itself streamed in from the
+  // fluid side and is left alone):
+  //   q <  1/2: f_o(x) = 2q f*_i(x) + (1 - 2q) f*_i(x - c_i)
+  //   q >= 1/2: f_o(x) = f*_i(x) / (2q) + (1 - 1/(2q)) f*_o(x)
+  // If x - c_i is outside the domain or solid, fall back to f_o(x) = f*_i(x).
   for (var i = 1u; i < Q; i++) {
     let q = linkQ[i * N + n];
     if (q <= 0.0) { continue; }
 
     let o = opp(i);
-    let fOppHere = postStream(x, y, o);
+    let fiHere = fB[i * N + n];
 
-    if (abs(q - 0.5) < 1e-6) {
-      r[i] = fOppHere;
-    } else if (q < 0.5) {
+    if (q < 0.5) {
       let xb = x - cx(i);
       let yb = y - cy(i);
-      var fOppBehind = fOppHere;
-      if (inBounds(xb, yb)) { fOppBehind = postStream(xb, yb, o); }
-      let inv1p2q = 1.0 / (1.0 + 2.0 * q);
-      r[i] = inv1p2q * fOppHere + (2.0 * q * inv1p2q) * fOppBehind;
+      var fiBehind = fiHere;
+      if (inBounds(xb, yb)) {
+        let nb = nodeIndex(xb, yb);
+        if (!isSolid(nb)) { fiBehind = fB[i * N + nb]; }
+      }
+      r[o] = 2.0 * q * fiHere + (1.0 - 2.0 * q) * fiBehind;
     } else {
-      let xa = x + cx(i);
-      let ya = y + cy(i);
-      var fOppAhead = fOppHere;
-      if (inBounds(xa, ya)) { fOppAhead = postStream(xa, ya, o); }
       let inv2q = 1.0 / (2.0 * q);
-      r[i] = inv2q * fOppHere + (1.0 - inv2q) * fOppAhead;
+      r[o] = inv2q * fiHere + (1.0 - inv2q) * fB[o * N + n];
     }
   }
 
@@ -410,48 +417,31 @@ fn stream_main(@builtin(global_invocation_id) g : vec3<u32>) {
 
   let solid = isSolid(n);
 
-  if (P.isCavity != 0u) {
-    // Moving lid on the first interior fluid row, resting row at the bottom.
-    if (x >= 1 && x <= NX - 2 && !solid) {
-      if (y == 2) {
-        for (var i = 0u; i < Q; i++) { r[i] = feq(i, 1.0, S.uInst, 0.0); }
-      }
-      if (y == NY - 3) {
-        for (var i = 0u; i < Q; i++) { r[i] = feq(i, 1.0, 0.0, 0.0); }
-      }
-    }
-  } else {
-    // Left inlet (split velocity profile for the nozzle).
-    if (x == 0 && !solid) {
-      var inletU = S.uInst;
-      if (P.nozzleActive != 0u) {
-        inletU = select(P.uCoflow, S.uInst, abs(f32(y) - P.nozzleCy) <= P.nozzleHalfD);
-      }
-      for (var i = 0u; i < Q; i++) { r[i] = feq(i, 1.0, inletU, 0.0); }
-    }
+  // Left inlet: uniform velocity.
+  if (x == 0 && !solid) {
+    for (var i = 0u; i < Q; i++) { r[i] = feq(i, 1.0, S.uInst, 0.0); }
+  }
 
-    // Outlet sponge, relaxed toward equilibrium at this step's macros.
-    if (x >= P.spongeStart && x <= NX - 2 && !solid) {
-      let t = f32(x - P.spongeStart) / P.spongeWidth;
-      let s = P.spongeStrength * t * t;
-      let m = mac[n];
-      for (var i = 0u; i < Q; i++) {
-        r[i] = (1.0 - s) * r[i] + s * feq(i, m.x, m.y, m.z);
-      }
+  // Outlet sponge, relaxed toward equilibrium at this step's macros.
+  if (x >= P.spongeStart && x <= NX - 2 && !solid) {
+    let t = f32(x - P.spongeStart) / P.spongeWidth;
+    let s = P.spongeStrength * t * t;
+    let m = mac[n];
+    for (var i = 0u; i < Q; i++) {
+      r[i] = (1.0 - s) * r[i] + s * feq(i, m.x, m.y, m.z);
     }
+  }
 
-    // Top and bottom: freestream (or co-flow for the nozzle).
-    if (y == 0 || y == NY - 1) {
-      let wallU = select(S.uInst, P.uCoflow, P.nozzleActive != 0u);
-      for (var i = 0u; i < Q; i++) { r[i] = feq(i, 1.0, wallU, 0.0); }
-    }
+  // Top and bottom: freestream.
+  if (y == 0 || y == NY - 1) {
+    for (var i = 0u; i < Q; i++) { r[i] = feq(i, 1.0, S.uInst, 0.0); }
   }
 
   for (var i = 0u; i < Q; i++) { fA[i * N + n] = r[i]; }
 }
 
 // ---------------------------------------------------------
-// Pass 4: zero-gradient outlet copy (non-cavity only)
+// Pass 4: zero-gradient outlet copy
 // ---------------------------------------------------------
 @compute @workgroup_size(64, 1, 1)
 fn outlet_main(@builtin(global_invocation_id) g : vec3<u32>) {
@@ -476,9 +466,13 @@ fn rest_solids(@builtin(global_invocation_id) g : vec3<u32>) {
 }
 
 // ---------------------------------------------------------
-// Diagnostics: normal-filtered fluctuation momentum exchange
-// (forceSurface.js). Uses the post-stream / pre-BFL snapshot of
-// the last step, reconstructed from fB.
+// Diagnostics: momentum-exchange force on the body for the last step.
+// For each link i at a fluid node (x + c_i solid), the momentum handed
+// to the wall is c_i (f*_i(x) + f_o(x)), with f*_i the post-collision
+// population going in (fB) and f_o, o = opp(i), the population the BFL
+// sends back (fA after stream_main). The rest state 2 w_i rho0 is
+// subtracted; it sums to zero over a closed body and only adds
+// round-off.
 // ---------------------------------------------------------
 var<workgroup> wsum : array<vec4<f32>, 256>;
 
@@ -503,36 +497,17 @@ fn force_main(
 
   if (k < P.surfCount) {
     let n = surfList[k];
-    let NX = i32(P.NX);
-    let NY = i32(P.NY);
     let xn = i32(n % P.NX);
     let yn = i32(n / P.NX);
-
-    let xl = select(xn, xn - 1, xn > 0);
-    let xr = select(xn, xn + 1, xn < NX - 1);
-    let yd = select(yn, yn - 1, yn > 0);
-    let yu = select(yn, yn + 1, yn < NY - 1);
-    let gx = (sdf[nodeIndex(xr, yn)] - sdf[nodeIndex(xl, yn)]) / f32(xr - xl);
-    let gy = (sdf[nodeIndex(xn, yu)] - sdf[nodeIndex(xn, yd)]) / f32(yu - yd);
-    let glen = sqrt(gx * gx + gy * gy);
-    var nxb = 0.0;
-    var nyb = 0.0;
-    if (glen > 1e-10) {
-      nxb = gx / glen;
-      nyb = gy / glen;
-    }
 
     for (var i = 1u; i < Q; i++) {
       if (linkQ[i * P.N + n] <= 0.0) { continue; }
       let c_x = f32(cx(i));
       let c_y = f32(cy(i));
-      let cMag = sqrt(c_x * c_x + c_y * c_y);
-      let cosA = -(c_x * nxb + c_y * nyb) / cMag;
-      if (cosA <= COS_THRESH) { continue; }
 
-      let fi = postStream(xn, yn, i) - wq(i) * P.rho0;
-      let dFx = 2.0 * c_x * fi;
-      let dFy = 2.0 * c_y * fi;
+      let ex = fB[i * P.N + n] + fA[opp(i) * P.N + n] - 2.0 * wq(i) * P.rho0;
+      let dFx = c_x * ex;
+      let dFy = c_y * ex;
       let ax = f32(xn) + 0.5 * c_x - P.forceRefX;
       let ay = f32(yn) + 0.5 * c_y - P.forceRefY;
       acc += vec4<f32>(dFx, dFy, ax * dFy - ay * dFx, 0.0);
@@ -636,18 +611,12 @@ fn particle_main(@builtin(global_invocation_id) g : vec3<u32>) {
     var seed = hash32(i * 747796405u + P.frameSeed * 2891336453u + 1u);
     var placed = false;
     for (var k = 0u; k < 8u; k++) {
-      var rx = 0.0;
+      let rx = rand01(&seed) * 2.0;
       var ry = 0.0;
-      if (P.isCavity != 0u) {
-        rx = 2.0 + rand01(&seed) * max(1.0, NXf - 4.0);
-        ry = 2.0 + rand01(&seed) * max(1.0, NYf - 4.0);
+      if (rand01(&seed) < 0.35) {
+        ry = clamp(NYf * 0.5 + (rand01(&seed) - 0.5) * (NYf / 3.0), 1.0, NYf - 2.0);
       } else {
-        rx = rand01(&seed) * 2.0;
-        if (rand01(&seed) < 0.35) {
-          ry = clamp(NYf * 0.5 + (rand01(&seed) - 0.5) * (NYf / 3.0), 1.0, NYf - 2.0);
-        } else {
-          ry = 1.0 + rand01(&seed) * max(1.0, NYf - 2.0);
-        }
+        ry = 1.0 + rand01(&seed) * max(1.0, NYf - 2.0);
       }
       if (!solidAt(rx, ry)) {
         out = vec4<f32>(rx, ry, 0.0, 0.0);
@@ -656,11 +625,7 @@ fn particle_main(@builtin(global_invocation_id) g : vec3<u32>) {
       }
     }
     if (!placed) {
-      if (P.isCavity != 0u) {
-        out = vec4<f32>(NXf * 0.5, NYf * 0.5, 0.0, 0.0);
-      } else {
-        out = vec4<f32>(0.5, NYf * 0.5, 0.0, 0.0);
-      }
+      out = vec4<f32>(0.5, NYf * 0.5, 0.0, 0.0);
     }
   }
 
